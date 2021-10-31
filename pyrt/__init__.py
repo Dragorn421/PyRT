@@ -160,12 +160,6 @@ assert u32_struct.size == 4
 rom_file_struct = struct.Struct(">II")
 assert rom_file_struct.size == 8
 
-actor_overlay_struct = struct.Struct(">IIIIIIIHbx")
-assert actor_overlay_struct.size == 0x20
-
-scene_table_entry_struct = struct.Struct(">IIIIBBBB")
-assert scene_table_entry_struct.size == 0x14
-
 scene_header_command_struct = struct.Struct(">BBxxI")
 assert scene_header_command_struct.size == 8
 
@@ -428,134 +422,6 @@ class ROM:
 
         return dma_entries
 
-    def parse_actor_overlay_table(self):
-        actor_overlay_table_length = self.version_info.actor_overlay_table_length
-        actor_overlay_table = [
-            None
-        ] * actor_overlay_table_length  # type: List[Optional[ActorOverlay]]
-        for actor_id in range(actor_overlay_table_length):
-            (
-                vrom_start,
-                vrom_end,
-                vram_start,
-                vram_end,
-                loaded_ram_addr,  # useless here
-                actor_init_vram_start,
-                name_vram_start,
-                alloc_type,
-                num_loaded,  # useless here
-            ) = actor_overlay_struct.unpack_from(
-                self.file_code.data,
-                self.version_info.actor_overlay_table_code_offset
-                + actor_id * actor_overlay_struct.size,
-            )
-
-            if actor_init_vram_start == 0:
-                # unset entry
-                actor_overlay = None
-            else:
-                is_overlay = not (
-                    vrom_start == 0
-                    and vrom_end == 0
-                    and vram_start == 0
-                    and vram_end == 0
-                )
-
-                assert self.version_info.code_vram_start <= name_vram_start
-
-                if is_overlay:
-                    assert vrom_start <= vrom_end
-                    assert vram_start <= vram_end
-                    assert vram_start <= actor_init_vram_start
-                    assert actor_init_vram_start < vram_end
-
-                    actor_overlay_file = self.find_file_by_vrom(vrom_start)
-                    assert actor_overlay_file.dma_entry.vrom_start == vrom_start
-                    assert actor_overlay_file.dma_entry.vrom_end == vrom_end
-
-                name_code_offset_start = (
-                    name_vram_start - self.version_info.code_vram_start
-                )
-                assert name_code_offset_start < len(self.file_code.data)
-
-                name_code_offset_end = name_code_offset_start
-
-                while self.file_code.data[name_code_offset_end] != 0:
-                    name_code_offset_end += 1
-                    assert name_code_offset_end <= len(self.file_code.data)
-                    assert name_code_offset_end - name_code_offset_start < 100
-
-                name = self.file_code.data[
-                    name_code_offset_start:name_code_offset_end
-                ].decode("ascii")
-
-                actor_overlay = ActorOverlay(
-                    actor_overlay_file if is_overlay else None,
-                    vram_start,
-                    vram_end,
-                    actor_init_vram_start,
-                    name,
-                    alloc_type,
-                )
-
-            actor_overlay_table[actor_id] = actor_overlay
-            print(
-                "{:03}".format(actor_id),
-                actor_overlay if actor_overlay is not None else "-",
-            )
-        return actor_overlay_table
-
-    def parse_scene_table(self):
-        scene_table_length = self.version_info.scene_table_length
-
-        scene_table = [None] * scene_table_length  # type: List[SceneTableEntry]
-        for scene_id in range(scene_table_length):
-            (
-                scene_vrom_start,
-                scene_vrom_end,
-                title_vrom_start,
-                title_vrom_end,
-                unk_10,
-                config,
-                unk_12,
-                unk_13,
-            ) = scene_table_entry_struct.unpack_from(
-                self.file_code.data,
-                self.version_info.scene_table_code_offset
-                + scene_id * scene_table_entry_struct.size,
-            )
-            assert scene_vrom_start <= scene_vrom_end
-            assert title_vrom_start <= title_vrom_end
-
-            scene_file = self.find_file_by_vrom(scene_vrom_start)
-            assert scene_file.dma_entry.vrom_start == scene_vrom_start
-            assert scene_file.dma_entry.vrom_end == scene_vrom_end
-
-            if title_vrom_start == 0 and title_vrom_end == 0:
-                # untitled scene
-                title_file = None
-            else:
-                # titled scene
-                title_file = self.find_file_by_vrom(title_vrom_start)
-                assert title_file.dma_entry.vrom_start == title_vrom_start
-                assert title_file.dma_entry.vrom_end == title_vrom_end
-
-            scene_table_entry = SceneTableEntry(
-                scene_file,
-                title_file,
-                unk_10,
-                config,
-                unk_12,
-                unk_13,
-            )
-
-            scene_table[scene_id] = scene_table_entry
-            print(
-                "{:03}".format(scene_id),
-                scene_table_entry if scene_table_entry is not None else "-",
-            )
-        return scene_table
-
     def parse_scene_headers(self):
         rooms_by_scene = dict()  # type: Dict[SceneTableEntry, List[RomFile]]
         for scene_table_entry in self.scene_table:
@@ -802,77 +668,6 @@ class ROM:
             # FIXME use dma_entry.name
         self.file_dmadata.data = dmadata_data
 
-    def pack_actor_overlay_table(self, code_data):
-        # FIXME check max length
-
-        for actor_id, actor_overlay in enumerate(self.actor_overlay_table):
-            if actor_overlay is not None:
-                if actor_overlay.file is not None:
-                    vrom_start = actor_overlay.file.dma_entry.vrom_start
-                    vrom_end = actor_overlay.file.dma_entry.vrom_end
-                else:
-                    vrom_start = 0
-                    vrom_end = 0
-                # TODO may want to make vram Optional if not an overlay
-                vram_start = actor_overlay.vram_start
-                vram_end = actor_overlay.vram_end
-                actor_init_vram_start = actor_overlay.actor_init_vram_start
-                # FIXME name_vram_start with actor_overlay.name
-                name_vram_start = self.version_info.code_vram_start + code_data.index(
-                    b"\x00"
-                )
-                alloc_type = actor_overlay.alloc_type
-            else:
-                vrom_start = 0
-                vrom_end = 0
-                vram_start = 0
-                vram_end = 0
-                actor_init_vram_start = 0
-                name_vram_start = 0
-                alloc_type = 0
-            loaded_ram_addr = 0
-            num_loaded = 0
-            actor_overlay_struct.pack_into(
-                code_data,
-                self.version_info.actor_overlay_table_code_offset
-                + actor_id * actor_overlay_struct.size,
-                vrom_start,
-                vrom_end,
-                vram_start,
-                vram_end,
-                loaded_ram_addr,
-                actor_init_vram_start,
-                name_vram_start,
-                alloc_type,
-                num_loaded,
-            )
-
-    def pack_scene_table(self, code_data):
-        # FIXME check max length
-
-        for scene_id, scene_table_entry in enumerate(self.scene_table):
-            scene_vrom_start = scene_table_entry.scene_file.dma_entry.vrom_start
-            scene_vrom_end = scene_table_entry.scene_file.dma_entry.vrom_end
-            if scene_table_entry.title_file is not None:
-                title_vrom_start = scene_table_entry.title_file.dma_entry.vrom_start
-                title_vrom_end = scene_table_entry.title_file.dma_entry.vrom_end
-            else:
-                title_vrom_start = 0
-                title_vrom_end = 0
-            scene_table_entry_struct.pack_into(
-                code_data,
-                self.version_info.scene_table_code_offset
-                + scene_id * scene_table_entry_struct.size,
-                scene_vrom_start,
-                scene_vrom_end,
-                title_vrom_start,
-                title_vrom_end,
-                scene_table_entry.unk_10,
-                scene_table_entry.config,
-                scene_table_entry.unk_12,
-                scene_table_entry.unk_13,
-            )
-
     def pack_room_lists(self):
         # TODO mostly copypasted from parse_scene_headers, make code common
         for scene_table_entry, room_list in self.rooms_by_scene.items():
@@ -1081,6 +876,8 @@ class PyRTInterface:
     def load_modules(self, dir_name):
         import importlib
 
+        module_names_by_task = dict()
+
         with os.scandir(os.path.join(".", dir_name)) as dir_iter:
             for dir_entry in dir_iter:
                 if not dir_entry.is_file():
@@ -1095,6 +892,18 @@ class PyRTInterface:
                 if not hasattr(module, "pyrt_module_info"):
                     print("Skipping module", module_name, "(no pyrt_module_info)")
                     continue
+                module_info = module.pyrt_module_info  # type: ModuleInfo
+                if module_info.task in module_names_by_task:
+                    raise Exception(
+                        "Duplicate module task "
+                        + module_info.task
+                        + " (used by both "
+                        + module_names_by_task[module_info.task]
+                        + " and "
+                        + module_name
+                        + ")"
+                    )
+                module_names_by_task[module_info.task] = module_name
                 self.modules.append(module)
 
     def register_modules(self):
@@ -1187,8 +996,6 @@ def main():
     rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
     rom.file_code = rom.files[rom.version_info.dmaentry_index_code]
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
-    rom.actor_overlay_table = rom.parse_actor_overlay_table()
-    rom.scene_table = rom.parse_scene_table()
     rom.rooms_by_scene = rom.parse_scene_headers()
     rom.find_unaccounted(rom.data)
 
@@ -1205,8 +1012,6 @@ def main():
     rom.code_data = bytearray(rom.file_code.data)
 
     pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
-    rom.pack_actor_overlay_table(rom.code_data)
-    rom.pack_scene_table(rom.code_data)
 
     rom.file_code.data = rom.code_data
 
