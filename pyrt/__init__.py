@@ -130,16 +130,23 @@ class RangesAscendingLength:
         """
         ranges = self.ranges
 
-        # find min i such that ranges[i] length >= length
+        # ranges[i-1] length < length <= ranges[i] length
         i = bisect.bisect_left([end - start for start, end in ranges], length)
-        start, end = ranges[i]
+
+        start, end = ranges.pop(i)
         exclude_start = start
         exclude_end = start + length
-        if end == exclude_end:
-            ranges.pop(i)
-        else:
-            # FIXME wtf did I write, this doesn't maintain ordering at all
-            ranges[i] = (exclude_end, end)
+
+        remain_start = exclude_end
+        remain_end = end
+        remain_length = remain_end - remain_start
+        if remain_length != 0:
+            # ranges[i-1] length < remain_length <= ranges[i] length
+            i = bisect.bisect_left(
+                [end - start for start, end in ranges], remain_length
+            )
+            ranges.insert(i, (remain_start, remain_end))
+
         return exclude_start, exclude_end
 
     def __repr__(self):
@@ -583,8 +590,15 @@ class ROM:
         print("free_vrom_ranges =", free_vrom_ranges)
 
         # sort files from largest to smallest
+        # If same size, sort by name. This makes the ordering consistent across
+        # different executions, but TODO it would be nice to find something
+        # else (like, index in the dma table), it may be faster, and would also
+        # be more portable (only debug versions have the file name, I think?).
         moveable_vrom_sorted = list(moveable_vrom)
-        moveable_vrom_sorted.sort(key=lambda file: len(file.data), reverse=True)
+        moveable_vrom_sorted.sort(
+            key=lambda file: (len(file.data), file.dma_entry.name),
+            reverse=True,
+        )
 
         # fit moveable vrom files in the space highlighted by dynamic_vrom_ranges,
         # shrinking those ranges as we go
@@ -636,7 +650,11 @@ class ROM:
 
         # sort files from largest to smallest
         moveable_rom_sorted = list(moveable_rom)
-        moveable_rom_sorted.sort(key=lambda file: len(file.data), reverse=True)
+        # TODO see the vrom equivalent moveable_vrom_sorted
+        moveable_rom_sorted.sort(
+            key=lambda file: (len(file.data), file.dma_entry.name),
+            reverse=True,
+        )
 
         # fit moveable rom files in the space highlighted by dynamic_rom_ranges,
         # shrinking those ranges as we go
