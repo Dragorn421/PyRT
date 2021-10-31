@@ -994,7 +994,7 @@ class ModuleInfo:
     def __init__(
         self,
         task,  # type: str
-        register,  # type: Callable[[PyRT],None]
+        register,  # type: Callable[[PyRTInterface],None]
         task_dependencies={},  # type: Set[str]
         description="",  # type: str
     ):
@@ -1170,7 +1170,7 @@ def main():
     pyrti.register_event(EVENT_DMA_LOAD_DONE)
     pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
 
-    pyrti.load_modules("pyrt_modules")
+    pyrti.load_modules("pyrt")
     pyrti.register_modules()
 
     dma_entries = rom.parse_dma_table(rom.data)
