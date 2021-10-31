@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 # MIT License
 #
 # Copyright (c) 2021 Dragorn421
@@ -25,7 +23,10 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import List, Dict, Set, Tuple, Optional
+    from typing import List, Dict, Set, Tuple, Optional, Callable
+    from types import ModuleType
+
+import os
 
 import struct
 import bisect
@@ -300,24 +301,7 @@ class ROM:
         data,  # type: bytes
     ):
         self.version_info = version_info
-        dma_entries = self.parse_dma_table(data)
-        self.files = []  # type: List[RomFile]
-        for dma_entry in dma_entries:
-            rom_end = dma_entry.rom_start + (dma_entry.vrom_end - dma_entry.vrom_start)
-            romfile = RomFile(
-                data[dma_entry.rom_start : rom_end],
-                dma_entry,
-            )
-            self.files.append(romfile)
-        self.file_makerom = self.files[self.version_info.dmaentry_index_makerom]
-        self.file_boot = self.files[self.version_info.dmaentry_index_boot]
-        self.file_dmadata = self.files[self.version_info.dmaentry_index_dmadata]
-        self.file_code = self.files[self.version_info.dmaentry_index_code]
-        self.object_table = self.parse_object_table()
-        self.actor_overlay_table = self.parse_actor_overlay_table()
-        self.scene_table = self.parse_scene_table()
-        self.rooms_by_scene = self.parse_scene_headers()
-        self.find_unaccounted(data)
+        self.data = data
 
     def find_unaccounted(self, data):
         rom_size = len(data)
@@ -443,36 +427,6 @@ class ROM:
             dmaentry_index += 1
 
         return dma_entries
-
-    def parse_object_table(self):
-        (object_table_length,) = u32_struct.unpack_from(
-            self.file_code.data, self.version_info.object_table_length_code_offset
-        )
-        object_table = [None] * object_table_length  # type: List[Optional[RomFile]]
-        for object_id in range(object_table_length):
-            vrom_start, vrom_end = rom_file_struct.unpack_from(
-                self.file_code.data,
-                self.version_info.object_table_code_offset
-                + object_id * rom_file_struct.size,
-            )
-            assert vrom_start <= vrom_end
-            if vrom_start == 0 and vrom_end == 0:
-                # unset entry
-                object_file = None
-            elif vrom_start == vrom_end:
-                # "NULL" entry
-                # such entries are unused, can safely use them as if unset
-                object_file = None
-            else:
-                object_file = self.find_file_by_vrom(vrom_start)
-                assert object_file.dma_entry.vrom_start == vrom_start
-                assert object_file.dma_entry.vrom_end == vrom_end
-            object_table[object_id] = object_file
-            print(
-                "{:03}".format(object_id),
-                object_file.dma_entry if object_file is not None else "-",
-            )
-        return object_table
 
     def parse_actor_overlay_table(self):
         actor_overlay_table_length = self.version_info.actor_overlay_table_length
@@ -716,6 +670,28 @@ class ROM:
         assert len(matching_files) == 1
         return matching_files[0]
 
+    def realloc_moveable_vrom(self, move_vrom):
+        # tag moveable files rom/vrom-wise
+        moveable_vrom = set()  # type: Set[RomFile]
+        if move_vrom:
+            moveable_vrom.update(file for file in self.object_table if file is not None)
+            moveable_vrom.update(
+                actor_overlay.file
+                for actor_overlay in self.actor_overlay_table
+                if actor_overlay is not None and actor_overlay.file is not None
+            )
+            moveable_vrom.update(
+                scene_table_entry.scene_file for scene_table_entry in self.scene_table
+            )
+            for room_list in self.rooms_by_scene.values():
+                moveable_vrom.update(room_list)
+
+        # OoT's `DmaMgr_SendRequestImpl` limits the vrom to 64MB
+        # https://github.com/zeldaret/oot/blob/f1d27bf6531fd6579d09dcf3078ee97c57b6fff1/src/boot/z_std_dma.c#L1864
+        max_vrom = 0x4000000  # 64MB
+
+        self.realloc_vrom(max_vrom, moveable_vrom)
+
     def realloc_vrom(self, max_vrom, moveable_vrom):
         # strands where vrom isn't taken by an "immoveable vrom file"
         dynamic_vrom_ranges = Ranges()
@@ -751,6 +727,26 @@ class ROM:
             file.dma_entry.vrom_start = start
             file.dma_entry.vrom_end = end
             print("VROM> {}".format(file.dma_entry))
+
+    def realloc_moveable_rom(self, move_rom):
+        # TODO can all other files really move?
+        if move_rom:
+            moveable_rom = set(self.files)
+            moveable_rom.remove(self.file_makerom)
+            moveable_rom.remove(self.file_boot)
+            moveable_rom.remove(self.file_dmadata)
+            # TODO these audio files can move if the rom pointers in code are updated accordingly
+            # https://github.com/zeldaret/oot/blob/bf0f26db9b9c2325cea249d6c8e0ec3b5152bcd6/src/code/audio_load.c#L1109
+            moveable_rom.remove(self.files[3])  # Audiobank
+            moveable_rom.remove(self.files[4])  # Audioseq
+            moveable_rom.remove(self.files[5])  # Audiotable
+        else:
+            moveable_rom = set()
+
+        # TODO is max_rom limited by anything apart from max_vrom to prevent eg a 128MB rom?
+        max_rom = 0x4000000  # 64MB
+
+        self.realloc_rom(max_rom, moveable_rom)
 
     def realloc_rom(self, max_rom, moveable_rom):
         # strands where rom isn't taken by an "immoveable rom file"
@@ -805,28 +801,6 @@ class ROM:
             )
             # FIXME use dma_entry.name
         self.file_dmadata.data = dmadata_data
-
-    def pack_object_table(self, code_data):
-        # FIXME check if not going past original table length
-        u32_struct.pack_into(
-            code_data,
-            self.version_info.object_table_length_code_offset,
-            len(self.object_table),
-        )
-        for object_id, file in enumerate(self.object_table):
-            if file is not None:
-                vrom_start = file.dma_entry.vrom_start
-                vrom_end = file.dma_entry.vrom_end
-            else:
-                vrom_start = 0
-                vrom_end = 0
-            rom_file_struct.pack_into(
-                code_data,
-                self.version_info.object_table_code_offset
-                + object_id * rom_file_struct.size,
-                vrom_start,
-                vrom_end,
-            )
 
     def pack_actor_overlay_table(self, code_data):
         # FIXME check max length
@@ -1005,66 +979,6 @@ class ROM:
             scene_table_entry.scene_file.data = scene_data
 
     def write(self, out):
-        move_vrom = True
-        move_rom = True
-
-        # tag moveable files rom/vrom-wise
-        moveable_vrom = set()  # type: Set[RomFile]
-        if move_vrom:
-            moveable_vrom.update(file for file in self.object_table if file is not None)
-            moveable_vrom.update(
-                actor_overlay.file
-                for actor_overlay in self.actor_overlay_table
-                if actor_overlay is not None and actor_overlay.file is not None
-            )
-            moveable_vrom.update(
-                scene_table_entry.scene_file for scene_table_entry in self.scene_table
-            )
-            for room_list in self.rooms_by_scene.values():
-                moveable_vrom.update(room_list)
-
-        # OoT's `DmaMgr_SendRequestImpl` limits the vrom to 64MB
-        # https://github.com/zeldaret/oot/blob/f1d27bf6531fd6579d09dcf3078ee97c57b6fff1/src/boot/z_std_dma.c#L1864
-        max_vrom = 0x4000000  # 64MB
-
-        self.realloc_vrom(max_vrom, moveable_vrom)
-
-        # TODO can all other files really move?
-        if move_rom:
-            moveable_rom = set(self.files)
-            moveable_rom.remove(self.file_makerom)
-            moveable_rom.remove(self.file_boot)
-            moveable_rom.remove(self.file_dmadata)
-            # TODO these audio files can move if the rom pointers in code are updated accordingly
-            # https://github.com/zeldaret/oot/blob/bf0f26db9b9c2325cea249d6c8e0ec3b5152bcd6/src/code/audio_load.c#L1109
-            moveable_rom.remove(self.files[3])  # Audiobank
-            moveable_rom.remove(self.files[4])  # Audioseq
-            moveable_rom.remove(self.files[5])  # Audiotable
-        else:
-            moveable_rom = set()
-
-        # TODO is max_rom limited by anything apart from max_vrom to prevent eg a 128MB rom?
-        max_rom = 0x4000000  # 64MB
-
-        self.realloc_rom(max_rom, moveable_rom)
-
-        # update tables
-
-        self.pack_dma_table()
-
-        code_data = bytearray(self.file_code.data)
-
-        self.pack_object_table(code_data)
-        self.pack_actor_overlay_table(code_data)
-        self.pack_scene_table(code_data)
-
-        self.file_code.data = code_data
-
-        # update scene headers
-        self.pack_room_lists()
-
-        # write
-
         rom_data = bytearray(
             max(file.dma_entry.rom_start + len(file.data) for file in self.files)
         )
@@ -1076,14 +990,228 @@ class ROM:
         out.write(rom_data)
 
 
+class ModuleInfo:
+    def __init__(
+        self,
+        task,  # type: str
+        register,  # type: Callable[[PyRT],None]
+        task_dependencies={},  # type: Set[str]
+        description="",  # type: str
+    ):
+        self.task = task
+        self.register = register
+        self.task_dependencies = task_dependencies
+        self.description = description
+
+    def __repr__(self) -> str:
+        return (
+            "ModuleInfo("
+            + ", ".join(
+                repr(v)
+                for v in (
+                    self.task,
+                    self.register,
+                    self.task_dependencies,
+                    self.description,
+                )
+            )
+            + ")"
+        )
+
+    def __str__(self) -> str:
+        return (
+            self.task
+            + ((" - " + self.description) if self.description else "")
+            + (
+                ("(depends on " + ", ".join(self.task_dependencies) + ")")
+                if self.task_dependencies
+                else ""
+            )
+        )
+
+
+class PyRTEvent:
+    def __init__(
+        self,
+        id,  # type: str
+        description,  # type: str
+    ):
+        self.id = id
+        self.description = description
+
+    def __repr__(self) -> str:
+        return (
+            "PyRTEvent("
+            + ", ".join(
+                repr(v)
+                for v in (
+                    self.id,
+                    self.description,
+                )
+            )
+            + ")"
+        )
+
+    def __str__(self) -> str:
+        return self.id + " - " + self.description
+
+
+EVENT_DMA_LOAD_DONE = PyRTEvent(
+    "DMA load done",
+    "After the DMA table has been parsed and the ROM split into the corresponding files.",
+)
+
+EVENT_ROM_VROM_REALLOC_DONE = PyRTEvent(
+    "ROM/VROM realloc done",
+    "After the file offsets in VROM/ROM got updated.",
+)
+
+
+class PyRTInterface:
+    def __init__(
+        self,
+        rom,  # type: ROM
+    ):
+        self.rom = rom
+        self.modules = []  # type: List[ModuleType]
+        self.event_listeners = (
+            dict()
+        )  # type: Dict[PyRTEvent, List[Callable[[PyRTInterface],None]]]
+
+    def load_modules(self, dir_name):
+        import importlib
+
+        with os.scandir(os.path.join(".", dir_name)) as dir_iter:
+            for dir_entry in dir_iter:
+                if not dir_entry.is_file():
+                    print("Skipping", dir_entry.path, "(not a file)")
+                    continue
+                if not dir_entry.name.endswith(".py"):
+                    print("Skipping", dir_entry.path, "(not a .py file)")
+                    continue
+                module_name = dir_entry.name[: -len(".py")]
+                print("Loading", module_name)
+                module = importlib.import_module(dir_name + "." + module_name)
+                if not hasattr(module, "pyrt_module_info"):
+                    print("Skipping module", module_name, "(no pyrt_module_info)")
+                    continue
+                self.modules.append(module)
+
+    def register_modules(self):
+        unregistered_modules = {
+            module.pyrt_module_info.task: module for module in self.modules
+        }
+        while unregistered_modules:
+            # find a module with no unregistered dependency
+            registerable_module_item = next(
+                (
+                    (module_task, module)
+                    for module_task, module in unregistered_modules.items()
+                    if not (
+                        module.pyrt_module_info.task_dependencies
+                        & unregistered_modules.keys()
+                    )
+                ),
+                None,
+            )
+            if registerable_module_item is None:
+                print("Can't solve dependencies for remaining modules.")
+                print("Skipping registration of:")
+                print(unregistered_modules)
+                break
+            module_task, module = registerable_module_item
+            module_info = module.pyrt_module_info  # type: ModuleInfo
+            module_info.register(self)
+            del unregistered_modules[module_task]
+
+    def register_event(
+        self,
+        event,  # type: PyRTEvent
+    ):
+        if event in self.event_listeners:
+            raise ValueError("Event already registered: " + repr(event))
+        self.event_listeners[event] = []
+
+    def raise_event(
+        self,
+        event,  # type: PyRTEvent
+    ):
+        for callback in self.event_listeners[event]:
+            try:
+                callback(self)
+            except Exception:
+                print("An error ocurred raising event =", repr(event))
+                raise
+
+    def add_event_listener(
+        self,
+        event,  # type: PyRTEvent
+        callback,  # type: Callable[[PyRTInterface],None]
+    ):
+        event_listeners = self.event_listeners.get(event)
+        if event_listeners is None:
+            import sys
+
+            print(repr(self.event_listeners), file=sys.stderr)
+            print(id(event), file=sys.stderr)
+            print([id(ev) for ev in self.event_listeners], file=sys.stderr)
+            raise ValueError("Event not registered: " + repr(event))
+        event_listeners.append(callback)
+
+
 def main():
     version_info = version_info_mq_debug
     with open("oot-mq-debug.z64", "rb") as f:
         data = f.read()
     rom = ROM(version_info, data)
+
+    pyrti = PyRTInterface(rom)
+
+    pyrti.register_event(EVENT_DMA_LOAD_DONE)
+    pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
+
+    pyrti.load_modules("pyrt_modules")
+    pyrti.register_modules()
+
+    dma_entries = rom.parse_dma_table(rom.data)
+    rom.files = []
+    for dma_entry in dma_entries:
+        rom_end = dma_entry.rom_start + (dma_entry.vrom_end - dma_entry.vrom_start)
+        romfile = RomFile(
+            rom.data[dma_entry.rom_start : rom_end],
+            dma_entry,
+        )
+        rom.files.append(romfile)
+    rom.file_makerom = rom.files[rom.version_info.dmaentry_index_makerom]
+    rom.file_boot = rom.files[rom.version_info.dmaentry_index_boot]
+    rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
+    rom.file_code = rom.files[rom.version_info.dmaentry_index_code]
+    pyrti.raise_event(EVENT_DMA_LOAD_DONE)
+    rom.actor_overlay_table = rom.parse_actor_overlay_table()
+    rom.scene_table = rom.parse_scene_table()
+    rom.rooms_by_scene = rom.parse_scene_headers()
+    rom.find_unaccounted(rom.data)
+
+    move_vrom = True
+    move_rom = True
+
+    rom.realloc_moveable_vrom(move_vrom)
+    rom.realloc_moveable_rom(move_rom)
+
+    # update tables
+
+    rom.pack_dma_table()
+
+    rom.code_data = bytearray(rom.file_code.data)
+
+    pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
+    rom.pack_actor_overlay_table(rom.code_data)
+    rom.pack_scene_table(rom.code_data)
+
+    rom.file_code.data = rom.code_data
+
+    # update scene headers
+    rom.pack_room_lists()
+
     with open("oot-build.z64", "wb") as f:
         rom.write(f)
-
-
-if __name__ == "__main__":
-    main()
