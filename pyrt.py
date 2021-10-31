@@ -25,9 +25,129 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import List
+    from typing import List, Dict, Set, Tuple, Optional
 
 import struct
+import bisect
+
+
+class Ranges:
+    def __init__(
+        self,
+        ranges=[],  # type: List[Tuple[int,int]]
+    ):
+        """
+        ranges is a list of (start, end) tuples, sorted like
+        ranges[i] start < ranges[i] end < ranges[i+1] start
+        (the class methods maintain that order)
+        """
+        self.ranges = ranges
+
+    def add_range(self, add_start, add_end):
+        ranges = self.ranges
+
+        # ranges[i-1] end < add_start <= ranges[i] end
+        i = bisect.bisect_left([end for start, end in ranges], add_start)
+
+        while i < len(ranges):
+            start, end = ranges[i]
+            if add_end < start:
+                break
+            if add_start > start:
+                add_start = start
+            if add_end < end:
+                add_end = end
+            self.ranges.pop(i)
+        self.ranges.insert(i, (add_start, add_end))
+
+    def exclude_range(self, exclude_start, exclude_end):
+        ranges = self.ranges
+
+        # ranges[i-1] end <= exclude_start < ranges[i] end
+        i = bisect.bisect_right([end for start, end in ranges], exclude_start)
+
+        while i < len(ranges):
+            start, end = ranges[i]
+            # stop if range starts after exclude range ends
+            if exclude_end <= start:
+                break
+
+            # start < exclude_end
+            if exclude_start <= start and exclude_end >= end:
+                # exclude_start <= start <= end <= exclude_end
+                ranges.pop(i)  # range completely excluded
+            elif exclude_start >= start and exclude_end <= end:
+                # start <= exclude_start <= exclude_end <= end
+                ranges.pop(i)
+                if start != exclude_start:
+                    ranges.insert(i, (start, exclude_start))
+                    i += 1
+                if exclude_end != end:
+                    ranges.insert(i, (exclude_end, end))
+                    i += 1
+            elif exclude_start >= start and exclude_start < end:
+                # start <= exclude_start < end (< exclude_end)
+                ranges.pop(i)
+                if start != exclude_start:
+                    ranges.insert(i, (start, exclude_start))
+                    i += 1
+            elif exclude_end > start and exclude_end <= end:
+                # (exclude_start <) start < exclude_end <= end
+                ranges.pop(i)
+                if exclude_end != end:
+                    ranges.insert(i, (exclude_end, end))
+                    i += 1
+            else:
+                # disjointed intervals
+                raise AssertionError(
+                    "disjointed: {:X}-{:X} {:X}-{:X}".format(
+                        start, end, exclude_start, exclude_end
+                    )
+                )
+
+    def __repr__(self):
+        return "Ranges({!r})".format(self.ranges)
+
+    def __str__(self):
+        return "Ranges " + ",".join(
+            "{:X}-{:X}".format(start, end) for start, end in self.ranges
+        )
+
+
+class RangesAscendingLength:
+    def __init__(
+        self,
+        ranges,  # type: List[Tuple[int,int]]
+    ):
+        self.ranges = ranges
+        self.ranges.sort(key=lambda range_limits: range_limits[1] - range_limits[0])
+
+    def find_and_exclude_range(self, length):
+        """
+        length = end - start
+        maintains (ranges[i] length) < (ranges[i+1] length)
+        """
+        ranges = self.ranges
+
+        # find min i such that ranges[i] length >= length
+        i = bisect.bisect_left([end - start for start, end in ranges], length)
+        start, end = ranges[i]
+        exclude_start = start
+        exclude_end = start + length
+        if end == exclude_end:
+            ranges.pop(i)
+        else:
+            # FIXME wtf did I write, this doesn't maintain ordering at all
+            ranges[i] = (exclude_end, end)
+        return exclude_start, exclude_end
+
+    def __repr__(self):
+        return "RangesAscendingLength({!r})".format(self.ranges)
+
+    def __str__(self):
+        return "RangesAscendingLength " + ",".join(
+            "{:X}-{:X}".format(start, end) for start, end in self.ranges
+        )
 
 
 dma_entry_struct = struct.Struct(">IIII")
@@ -45,6 +165,9 @@ assert actor_overlay_struct.size == 0x20
 scene_table_entry_struct = struct.Struct(">IIIIBBBB")
 assert scene_table_entry_struct.size == 0x14
 
+scene_header_command_struct = struct.Struct(">BBxxI")
+assert scene_header_command_struct.size == 8
+
 
 class VersionInfo:
     def __init__(self, **kwargs):
@@ -53,12 +176,13 @@ class VersionInfo:
 
 
 version_info_mq_debug = VersionInfo(
-    dmaentry_index_dmadata=2,
+    dmaentry_index_makerom=0,
     dmaentry_index_boot=1,
+    dmaentry_index_dmadata=2,
+    dmaentry_index_code=28,
     dmadata_rom_start=0x012F70,
     dma_table_filenames_boot_offset=0x00A06C - 0x001060,
     boot_vram_start=0x80000460,
-    dmaentry_index_code=28,
     code_vram_start=0x8001CE60,
     # gObjectTable
     object_table_length_code_offset=0x80127524 - 0x8001CE60,
@@ -116,7 +240,7 @@ class RomFile:
 class ActorOverlay:
     def __init__(
         self,
-        file,
+        file,  # type: Optional[RomFile]
         vram_start,
         vram_end,
         actor_init_vram_start,
@@ -145,8 +269,8 @@ class ActorOverlay:
 class SceneTableEntry:
     def __init__(
         self,
-        scene_file,
-        title_file,
+        scene_file,  # type: RomFile
+        title_file,  # type: Optional[RomFile]
         unk_10,
         config,
         unk_12,
@@ -185,12 +309,14 @@ class ROM:
                 dma_entry,
             )
             self.files.append(romfile)
+        self.file_makerom = self.files[self.version_info.dmaentry_index_makerom]
+        self.file_boot = self.files[self.version_info.dmaentry_index_boot]
         self.file_dmadata = self.files[self.version_info.dmaentry_index_dmadata]
         self.file_code = self.files[self.version_info.dmaentry_index_code]
         self.object_table = self.parse_object_table()
         self.actor_overlay_table = self.parse_actor_overlay_table()
         self.scene_table = self.parse_scene_table()
-        # self.room_files = self.parse_scene_headers() # TODO
+        self.rooms_by_scene = self.parse_scene_headers()
         self.find_unaccounted(data)
 
     def find_unaccounted(self, data):
@@ -322,7 +448,7 @@ class ROM:
         (object_table_length,) = u32_struct.unpack_from(
             self.file_code.data, self.version_info.object_table_length_code_offset
         )
-        object_table = [None] * object_table_length  # type: List[RomFile]
+        object_table = [None] * object_table_length  # type: List[Optional[RomFile]]
         for object_id in range(object_table_length):
             vrom_start, vrom_end = rom_file_struct.unpack_from(
                 self.file_code.data,
@@ -352,7 +478,7 @@ class ROM:
         actor_overlay_table_length = self.version_info.actor_overlay_table_length
         actor_overlay_table = [
             None
-        ] * actor_overlay_table_length  # type: List[ActorOverlay]
+        ] * actor_overlay_table_length  # type: List[Optional[ActorOverlay]]
         for actor_id in range(actor_overlay_table_length):
             (
                 vrom_start,
@@ -476,6 +602,111 @@ class ROM:
             )
         return scene_table
 
+    def parse_scene_headers(self):
+        rooms_by_scene = dict()  # type: Dict[SceneTableEntry, List[RomFile]]
+        for scene_table_entry in self.scene_table:
+            scene_data = scene_table_entry.scene_file.data
+            header_offsets = [0]
+            # find alternate headers
+            offset = 0
+            code = None
+            while code != 0x14:
+                (code, data1, data2) = scene_header_command_struct.unpack_from(
+                    scene_data, offset
+                )
+                offset += scene_header_command_struct.size
+                if code != 0x18:
+                    continue
+                alternate_headers_list_offset = data2
+                while alternate_headers_list_offset + u32_struct.size <= len(
+                    scene_data
+                ):
+                    (alternate_header_segment_offset,) = u32_struct.unpack_from(
+                        scene_data,
+                        alternate_headers_list_offset,
+                    )
+                    alternate_headers_list_offset += u32_struct.size
+                    if alternate_header_segment_offset == 0:
+                        continue
+                    if (alternate_header_segment_offset >> 24) != 0x02:
+                        break
+                    alternate_header_offset = alternate_header_segment_offset & 0xFFFFFF
+                    # check if the data at the offset looks like headers
+                    alt_offset = alternate_header_offset
+                    alt_code = None
+                    while (
+                        alt_code != 0x14
+                        and alt_offset + scene_header_command_struct.size
+                        <= len(scene_data)
+                    ):
+                        (
+                            alt_code,
+                            alt_data1,
+                            alt_data2,
+                        ) = scene_header_command_struct.unpack_from(
+                            scene_data, alt_offset
+                        )
+                        # invalid command
+                        if alt_code >= 0x1A:
+                            break
+                        # invalid commands in the context of alternate scene headers
+                        if alt_code in {0x01, 0x0A, 0x0B, 0x18}:
+                            break
+                        # valid commands if data2 is a valid segment offset
+                        # (the segment is always the scene file)
+                        if alt_code in {0x00, 0x03, 0x04, 0x06, 0x0E, 0x0F, 0x13}:
+                            if (data2 >> 24) != 0x02:
+                                break
+                            if (data2 & 0xFFFFFF) >= len(scene_data):
+                                break
+                    if alt_code == 0x14:
+                        header_offsets.append(alternate_header_offset)
+                    else:
+                        break
+            # find room list from all headers
+            for offset in header_offsets:
+                code = None
+                room_list = []  # type: List[RomFile]
+                while code != 0x14:
+                    (code, data1, data2) = scene_header_command_struct.unpack_from(
+                        scene_data, offset
+                    )
+                    offset += scene_header_command_struct.size
+                    if code != 0x04:
+                        continue
+                    room_list_length = data1
+                    room_list_segment_offset = data2
+                    assert (room_list_segment_offset >> 24) == 0x02
+                    room_list_offset = room_list_segment_offset & 0xFFFFFF
+                    assert (
+                        room_list_offset + room_list_length * rom_file_struct.size
+                        <= len(scene_data)
+                    )
+                    for room_index in range(room_list_length):
+                        (room_vrom_start, room_vrom_end) = rom_file_struct.unpack_from(
+                            scene_data,
+                            room_list_offset + room_index * rom_file_struct.size,
+                        )
+                        assert room_vrom_start <= room_vrom_end
+                        room_file = self.find_file_by_vrom(room_vrom_start)
+                        assert room_vrom_start == room_file.dma_entry.vrom_start
+                        assert room_vrom_end == room_file.dma_entry.vrom_end
+                        room_list.append(room_file)
+                if scene_table_entry not in rooms_by_scene:
+                    rooms_by_scene[scene_table_entry] = room_list
+                    print(scene_table_entry)
+                    print(
+                        "\n".join(
+                            " #{:<2} {}".format(room_index, room.dma_entry)
+                            for room_index, room in enumerate(room_list)
+                        )
+                    )
+                else:
+                    # TODO support different room lists for each header
+                    # for now, just check that all room lists are the same
+                    assert rooms_by_scene[scene_table_entry] == room_list
+        return rooms_by_scene
+
     def find_file_by_vrom(self, vrom):
         matching_files = [
             file
@@ -485,49 +716,364 @@ class ROM:
         assert len(matching_files) == 1
         return matching_files[0]
 
-    def write(self, out):
-        # tag moveable files rom/vrom-wise
-        moveable_vrom = set()
-        moveable_vrom.update(file for file in self.object_table)
-        moveable_vrom.update(
-            actor_overlay.file
-            for actor_overlay in self.actor_overlay_table
-            if actor_overlay is not None and actor_overlay.file is not None
-        )
-        moveable_vrom.update(
-            scene_table_entry.scene_file for scene_table_entry in self.scene_table
-        )
+    def realloc_vrom(self, max_vrom, moveable_vrom):
+        # strands where vrom isn't taken by an "immoveable vrom file"
+        dynamic_vrom_ranges = Ranges()
+        dynamic_vrom_ranges.add_range(0, max_vrom)
 
-        # TODO can all other files really move?
-        moveable_rom = set(self.files)
-        moveable_rom.remove(self.files[0])  # TODO makerom
-        moveable_rom.remove(self.files[1])  # TODO boot
-        moveable_rom.remove(self.file_dmadata)
-        # normalize vrom usage
-        # TODO
-        dynamic_vrom_ranges = (
-            ...
-        )  # strands where vrom isn't taken by an "immoveable vrom file"
-
-        # max_vrom can be arbitrarily large, just need enough space
-        max_vrom = 128 * (2 ** 10) ** 2  # 128 MB
-        dynamic_vrom_ranges = [(0, max_vrom)]
         for file in self.files:
             if file not in moveable_vrom:
-                static_vrom_start = file.dma_entry.vrom_start
-                static_vrom_end = file.dma_entry.vrom_end
-                for i, (dynamic_vrom_start, dynamic_vrom_end) in enumerate(dynamic_vrom_ranges):
-                    ...
+                vrom_start = file.dma_entry.vrom_start
+                vrom_end = file.dma_entry.vrom_end
+                dynamic_vrom_ranges.exclude_range(vrom_start, vrom_end)
+                # the vrom offsets of this file won't be updated,
+                # check now if the file fits the reserved vrom
+                assert len(file.data) == (vrom_end - vrom_start)
+
+        print("dynamic_vrom_ranges =", dynamic_vrom_ranges)
+
+        # FIXME handle alignment somewhere
+
+        # sort ranges from smallest to largest
+        free_vrom_ranges = RangesAscendingLength(dynamic_vrom_ranges.ranges)
+        del dynamic_vrom_ranges
+
+        print("free_vrom_ranges =", free_vrom_ranges)
+
+        # sort files from largest to smallest
+        moveable_vrom_sorted = list(moveable_vrom)
+        moveable_vrom_sorted.sort(key=lambda file: len(file.data), reverse=True)
 
         # fit moveable vrom files in the space highlighted by dynamic_vrom_ranges,
         # shrinking those ranges as we go
+        for file in moveable_vrom_sorted:
+            start, end = free_vrom_ranges.find_and_exclude_range(len(file.data))
+            file.dma_entry.vrom_start = start
+            file.dma_entry.vrom_end = end
+            print("VROM> {}".format(file.dma_entry))
 
-        # normalize rom usage
+    def realloc_rom(self, max_rom, moveable_rom):
+        # strands where rom isn't taken by an "immoveable rom file"
+        dynamic_rom_ranges = Ranges()
+        dynamic_rom_ranges.add_range(0, max_rom)
+
+        for file in self.files:
+            if file not in moveable_rom:
+                dynamic_rom_ranges.exclude_range(
+                    file.dma_entry.rom_start,
+                    file.dma_entry.rom_start + len(file.data),
+                )
+
+        print("dynamic_rom_ranges =", dynamic_rom_ranges)
+
+        # sort ranges from smallest to largest
+        free_rom_ranges = RangesAscendingLength(dynamic_rom_ranges.ranges)
+        del dynamic_rom_ranges
+
+        print("free_rom_ranges =", free_rom_ranges)
+
+        # sort files from largest to smallest
+        moveable_rom_sorted = list(moveable_rom)
+        moveable_rom_sorted.sort(key=lambda file: len(file.data), reverse=True)
+
+        # fit moveable rom files in the space highlighted by dynamic_rom_ranges,
+        # shrinking those ranges as we go
+        for file in moveable_rom_sorted:
+            start, end = free_rom_ranges.find_and_exclude_range(len(file.data))
+            file.dma_entry.rom_start = start
+            file.dma_entry.rom_end = 0  # TODO ?
+            print("ROM> {}".format(file.dma_entry))
+
+    def pack_dma_table(self):
+        assert self.file_makerom == self.files[self.version_info.dmaentry_index_makerom]
+        assert self.file_boot == self.files[self.version_info.dmaentry_index_boot]
+        assert self.file_dmadata == self.files[self.version_info.dmaentry_index_dmadata]
+        assert self.file_code == self.files[self.version_info.dmaentry_index_code]
+
+        dmadata_data = bytearray(len(self.file_dmadata.data))
+        print("Built DMA table:")
+        for i, file in enumerate(self.files):
+            dma_entry = file.dma_entry
+            print(dma_entry)
+            dma_entry_struct.pack_into(
+                dmadata_data,
+                i * dma_entry_struct.size,
+                dma_entry.vrom_start,
+                dma_entry.vrom_end,
+                dma_entry.rom_start,
+                dma_entry.rom_end,
+            )
+            # FIXME use dma_entry.name
+        self.file_dmadata.data = dmadata_data
+
+    def pack_object_table(self, code_data):
+        # FIXME check if not going past original table length
+        u32_struct.pack_into(
+            code_data,
+            self.version_info.object_table_length_code_offset,
+            len(self.object_table),
+        )
+        for object_id, file in enumerate(self.object_table):
+            if file is not None:
+                vrom_start = file.dma_entry.vrom_start
+                vrom_end = file.dma_entry.vrom_end
+            else:
+                vrom_start = 0
+                vrom_end = 0
+            rom_file_struct.pack_into(
+                code_data,
+                self.version_info.object_table_code_offset
+                + object_id * rom_file_struct.size,
+                vrom_start,
+                vrom_end,
+            )
+
+    def pack_actor_overlay_table(self, code_data):
+        # FIXME check max length
+
+        for actor_id, actor_overlay in enumerate(self.actor_overlay_table):
+            if actor_overlay is not None:
+                if actor_overlay.file is not None:
+                    vrom_start = actor_overlay.file.dma_entry.vrom_start
+                    vrom_end = actor_overlay.file.dma_entry.vrom_end
+                else:
+                    vrom_start = 0
+                    vrom_end = 0
+                # TODO may want to make vram Optional if not an overlay
+                vram_start = actor_overlay.vram_start
+                vram_end = actor_overlay.vram_end
+                actor_init_vram_start = actor_overlay.actor_init_vram_start
+                # FIXME name_vram_start with actor_overlay.name
+                name_vram_start = self.version_info.code_vram_start + code_data.index(
+                    b"\x00"
+                )
+                alloc_type = actor_overlay.alloc_type
+            else:
+                vrom_start = 0
+                vrom_end = 0
+                vram_start = 0
+                vram_end = 0
+                actor_init_vram_start = 0
+                name_vram_start = 0
+                alloc_type = 0
+            loaded_ram_addr = 0
+            num_loaded = 0
+            actor_overlay_struct.pack_into(
+                code_data,
+                self.version_info.actor_overlay_table_code_offset
+                + actor_id * actor_overlay_struct.size,
+                vrom_start,
+                vrom_end,
+                vram_start,
+                vram_end,
+                loaded_ram_addr,
+                actor_init_vram_start,
+                name_vram_start,
+                alloc_type,
+                num_loaded,
+            )
+
+    def pack_scene_table(self, code_data):
+        # FIXME check max length
+
+        for scene_id, scene_table_entry in enumerate(self.scene_table):
+            scene_vrom_start = scene_table_entry.scene_file.dma_entry.vrom_start
+            scene_vrom_end = scene_table_entry.scene_file.dma_entry.vrom_end
+            if scene_table_entry.title_file is not None:
+                title_vrom_start = scene_table_entry.title_file.dma_entry.vrom_start
+                title_vrom_end = scene_table_entry.title_file.dma_entry.vrom_end
+            else:
+                title_vrom_start = 0
+                title_vrom_end = 0
+            scene_table_entry_struct.pack_into(
+                code_data,
+                self.version_info.scene_table_code_offset
+                + scene_id * scene_table_entry_struct.size,
+                scene_vrom_start,
+                scene_vrom_end,
+                title_vrom_start,
+                title_vrom_end,
+                scene_table_entry.unk_10,
+                scene_table_entry.config,
+                scene_table_entry.unk_12,
+                scene_table_entry.unk_13,
+            )
+
+    def pack_room_lists(self):
+        # TODO mostly copypasted from parse_scene_headers, make code common
+        for scene_table_entry, room_list in self.rooms_by_scene.items():
+            print("Scene ", scene_table_entry.scene_file.dma_entry)
+            scene_data = bytearray(scene_table_entry.scene_file.data)
+            header_offsets = [0]
+            # find alternate headers
+            offset = 0
+            code = None
+            while code != 0x14:
+                (code, data1, data2) = scene_header_command_struct.unpack_from(
+                    scene_data, offset
+                )
+                offset += scene_header_command_struct.size
+                if code != 0x18:
+                    continue
+                # FIXME there are fixes like this line not present in the og code that got copypasted
+                # TODO check segment 2
+                alternate_headers_list_offset = data2 & 0xFFFFFF
+                import sys
+
+                print(
+                    "alternate_headers_list_offset = {:06X}".format(
+                        alternate_headers_list_offset
+                    ),
+                    file=sys.stderr,
+                )
+                while alternate_headers_list_offset + u32_struct.size <= len(
+                    scene_data
+                ):
+                    (alternate_header_segment_offset,) = u32_struct.unpack_from(
+                        scene_data,
+                        alternate_headers_list_offset,
+                    )
+                    alternate_headers_list_offset += u32_struct.size
+                    if alternate_header_segment_offset == 0:
+                        continue
+                    if (alternate_header_segment_offset >> 24) != 0x02:
+                        break
+                    alternate_header_offset = alternate_header_segment_offset & 0xFFFFFF
+                    # check if the data at the offset looks like headers
+                    alt_offset = alternate_header_offset
+                    alt_code = None
+                    while (
+                        alt_code != 0x14
+                        and alt_offset + scene_header_command_struct.size
+                        <= len(scene_data)
+                    ):
+                        (
+                            alt_code,
+                            alt_data1,
+                            alt_data2,
+                        ) = scene_header_command_struct.unpack_from(
+                            scene_data, alt_offset
+                        )
+                        alt_offset += (
+                            scene_header_command_struct.size
+                        )  # FIXME another uncopied bugfix
+                        # invalid command
+                        if alt_code >= 0x1A:
+                            break
+                        # invalid commands in the context of alternate scene headers
+                        if alt_code in {0x01, 0x0A, 0x0B, 0x18}:
+                            break
+                        # valid commands if data2 is a valid segment offset
+                        # (the segment is always the scene file)
+                        if alt_code in {0x00, 0x03, 0x04, 0x06, 0x0E, 0x0F, 0x13}:
+                            if (data2 >> 24) != 0x02:
+                                break
+                            if (data2 & 0xFFFFFF) >= len(scene_data):
+                                break
+                    if alt_code == 0x14:
+                        header_offsets.append(alternate_header_offset)
+                    else:
+                        break
+            # find room list from all headers
+            for offset in header_offsets:
+                print("  Header 0x{:06X}".format(offset))
+                code = None
+                while code != 0x14:
+                    (code, data1, data2) = scene_header_command_struct.unpack_from(
+                        scene_data, offset
+                    )
+                    offset += scene_header_command_struct.size
+                    if code != 0x04:
+                        continue
+                    room_list_length = data1
+                    assert room_list_length == len(room_list)
+                    room_list_segment_offset = data2
+                    assert (room_list_segment_offset >> 24) == 0x02
+                    room_list_offset = room_list_segment_offset & 0xFFFFFF
+                    assert (
+                        room_list_offset + room_list_length * rom_file_struct.size
+                        <= len(scene_data)
+                    )
+                    for room_index, room_file in enumerate(room_list):
+                        rom_file_struct.pack_into(
+                            scene_data,
+                            room_list_offset + room_index * rom_file_struct.size,
+                            room_file.dma_entry.vrom_start,
+                            room_file.dma_entry.vrom_end,
+                        )
+                        print("    Room {}".format(room_index), room_file.dma_entry)
+            scene_table_entry.scene_file.data = scene_data
+
+    def write(self, out):
+        move_vrom = True
+        move_rom = True
+
+        # tag moveable files rom/vrom-wise
+        moveable_vrom = set()  # type: Set[RomFile]
+        if move_vrom:
+            moveable_vrom.update(file for file in self.object_table if file is not None)
+            moveable_vrom.update(
+                actor_overlay.file
+                for actor_overlay in self.actor_overlay_table
+                if actor_overlay is not None and actor_overlay.file is not None
+            )
+            moveable_vrom.update(
+                scene_table_entry.scene_file for scene_table_entry in self.scene_table
+            )
+            for room_list in self.rooms_by_scene.values():
+                moveable_vrom.update(room_list)
+
+        # OoT's `DmaMgr_SendRequestImpl` limits the vrom to 64MB
+        # https://github.com/zeldaret/oot/blob/f1d27bf6531fd6579d09dcf3078ee97c57b6fff1/src/boot/z_std_dma.c#L1864
+        max_vrom = 0x4000000  # 64MB
+
+        self.realloc_vrom(max_vrom, moveable_vrom)
+
+        # TODO can all other files really move?
+        if move_rom:
+            moveable_rom = set(self.files)
+            moveable_rom.remove(self.file_makerom)
+            moveable_rom.remove(self.file_boot)
+            moveable_rom.remove(self.file_dmadata)
+            # TODO these audio files can move if the rom pointers in code are updated accordingly
+            # https://github.com/zeldaret/oot/blob/bf0f26db9b9c2325cea249d6c8e0ec3b5152bcd6/src/code/audio_load.c#L1109
+            moveable_rom.remove(self.files[3])  # Audiobank
+            moveable_rom.remove(self.files[4])  # Audioseq
+            moveable_rom.remove(self.files[5])  # Audiotable
+        else:
+            moveable_rom = set()
+
+        # TODO is max_rom limited by anything apart from max_vrom to prevent eg a 128MB rom?
+        max_rom = 0x4000000  # 64MB
+
+        self.realloc_rom(max_rom, moveable_rom)
 
         # update tables
 
+        self.pack_dma_table()
+
+        code_data = bytearray(self.file_code.data)
+
+        self.pack_object_table(code_data)
+        self.pack_actor_overlay_table(code_data)
+        self.pack_scene_table(code_data)
+
+        self.file_code.data = code_data
+
+        # update scene headers
+        self.pack_room_lists()
+
         # write
-        out.write(...)
+
+        rom_data = bytearray(
+            max(file.dma_entry.rom_start + len(file.data) for file in self.files)
+        )
+        print(len(rom_data))
+        for file in self.files:
+            rom_data[
+                file.dma_entry.rom_start : file.dma_entry.rom_start + len(file.data)
+            ] = file.data
+        out.write(rom_data)
 
 
 def main():
