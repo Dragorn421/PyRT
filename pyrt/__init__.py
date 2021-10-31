@@ -167,9 +167,6 @@ assert u32_struct.size == 4
 rom_file_struct = struct.Struct(">II")
 assert rom_file_struct.size == 8
 
-scene_header_command_struct = struct.Struct(">BBxxI")
-assert scene_header_command_struct.size == 8
-
 
 class VersionInfo:
     def __init__(self, **kwargs):
@@ -429,111 +426,6 @@ class ROM:
 
         return dma_entries
 
-    def parse_scene_headers(self):
-        rooms_by_scene = dict()  # type: Dict[SceneTableEntry, List[RomFile]]
-        for scene_table_entry in self.scene_table:
-            scene_data = scene_table_entry.scene_file.data
-            header_offsets = [0]
-            # find alternate headers
-            offset = 0
-            code = None
-            while code != 0x14:
-                (code, data1, data2) = scene_header_command_struct.unpack_from(
-                    scene_data, offset
-                )
-                offset += scene_header_command_struct.size
-                if code != 0x18:
-                    continue
-                alternate_headers_list_offset = data2
-                while alternate_headers_list_offset + u32_struct.size <= len(
-                    scene_data
-                ):
-                    (alternate_header_segment_offset,) = u32_struct.unpack_from(
-                        scene_data,
-                        alternate_headers_list_offset,
-                    )
-                    alternate_headers_list_offset += u32_struct.size
-                    if alternate_header_segment_offset == 0:
-                        continue
-                    if (alternate_header_segment_offset >> 24) != 0x02:
-                        break
-                    alternate_header_offset = alternate_header_segment_offset & 0xFFFFFF
-                    # check if the data at the offset looks like headers
-                    alt_offset = alternate_header_offset
-                    alt_code = None
-                    while (
-                        alt_code != 0x14
-                        and alt_offset + scene_header_command_struct.size
-                        <= len(scene_data)
-                    ):
-                        (
-                            alt_code,
-                            alt_data1,
-                            alt_data2,
-                        ) = scene_header_command_struct.unpack_from(
-                            scene_data, alt_offset
-                        )
-                        # invalid command
-                        if alt_code >= 0x1A:
-                            break
-                        # invalid commands in the context of alternate scene headers
-                        if alt_code in {0x01, 0x0A, 0x0B, 0x18}:
-                            break
-                        # valid commands if data2 is a valid segment offset
-                        # (the segment is always the scene file)
-                        if alt_code in {0x00, 0x03, 0x04, 0x06, 0x0E, 0x0F, 0x13}:
-                            if (data2 >> 24) != 0x02:
-                                break
-                            if (data2 & 0xFFFFFF) >= len(scene_data):
-                                break
-                    if alt_code == 0x14:
-                        header_offsets.append(alternate_header_offset)
-                    else:
-                        break
-            # find room list from all headers
-            for offset in header_offsets:
-                code = None
-                room_list = []  # type: List[RomFile]
-                while code != 0x14:
-                    (code, data1, data2) = scene_header_command_struct.unpack_from(
-                        scene_data, offset
-                    )
-                    offset += scene_header_command_struct.size
-                    if code != 0x04:
-                        continue
-                    room_list_length = data1
-                    room_list_segment_offset = data2
-                    assert (room_list_segment_offset >> 24) == 0x02
-                    room_list_offset = room_list_segment_offset & 0xFFFFFF
-                    assert (
-                        room_list_offset + room_list_length * rom_file_struct.size
-                        <= len(scene_data)
-                    )
-                    for room_index in range(room_list_length):
-                        (room_vrom_start, room_vrom_end) = rom_file_struct.unpack_from(
-                            scene_data,
-                            room_list_offset + room_index * rom_file_struct.size,
-                        )
-                        assert room_vrom_start <= room_vrom_end
-                        room_file = self.find_file_by_vrom(room_vrom_start)
-                        assert room_vrom_start == room_file.dma_entry.vrom_start
-                        assert room_vrom_end == room_file.dma_entry.vrom_end
-                        room_list.append(room_file)
-                if scene_table_entry not in rooms_by_scene:
-                    rooms_by_scene[scene_table_entry] = room_list
-                    print(scene_table_entry)
-                    print(
-                        "\n".join(
-                            " #{:<2} {}".format(room_index, room.dma_entry)
-                            for room_index, room in enumerate(room_list)
-                        )
-                    )
-                else:
-                    # TODO support different room lists for each header
-                    # for now, just check that all room lists are the same
-                    assert rooms_by_scene[scene_table_entry] == room_list
-        return rooms_by_scene
-
     def find_file_by_vrom(self, vrom):
         matching_files = [
             file
@@ -686,111 +578,6 @@ class ROM:
             # FIXME use dma_entry.name
         self.file_dmadata.data = dmadata_data
 
-    def pack_room_lists(self):
-        # TODO mostly copypasted from parse_scene_headers, make code common
-        for scene_table_entry, room_list in self.rooms_by_scene.items():
-            print("Scene ", scene_table_entry.scene_file.dma_entry)
-            scene_data = bytearray(scene_table_entry.scene_file.data)
-            header_offsets = [0]
-            # find alternate headers
-            offset = 0
-            code = None
-            while code != 0x14:
-                (code, data1, data2) = scene_header_command_struct.unpack_from(
-                    scene_data, offset
-                )
-                offset += scene_header_command_struct.size
-                if code != 0x18:
-                    continue
-                # FIXME there are fixes like this line not present in the og code that got copypasted
-                # TODO check segment 2
-                alternate_headers_list_offset = data2 & 0xFFFFFF
-                import sys
-
-                print(
-                    "alternate_headers_list_offset = {:06X}".format(
-                        alternate_headers_list_offset
-                    ),
-                    file=sys.stderr,
-                )
-                while alternate_headers_list_offset + u32_struct.size <= len(
-                    scene_data
-                ):
-                    (alternate_header_segment_offset,) = u32_struct.unpack_from(
-                        scene_data,
-                        alternate_headers_list_offset,
-                    )
-                    alternate_headers_list_offset += u32_struct.size
-                    if alternate_header_segment_offset == 0:
-                        continue
-                    if (alternate_header_segment_offset >> 24) != 0x02:
-                        break
-                    alternate_header_offset = alternate_header_segment_offset & 0xFFFFFF
-                    # check if the data at the offset looks like headers
-                    alt_offset = alternate_header_offset
-                    alt_code = None
-                    while (
-                        alt_code != 0x14
-                        and alt_offset + scene_header_command_struct.size
-                        <= len(scene_data)
-                    ):
-                        (
-                            alt_code,
-                            alt_data1,
-                            alt_data2,
-                        ) = scene_header_command_struct.unpack_from(
-                            scene_data, alt_offset
-                        )
-                        alt_offset += (
-                            scene_header_command_struct.size
-                        )  # FIXME another uncopied bugfix
-                        # invalid command
-                        if alt_code >= 0x1A:
-                            break
-                        # invalid commands in the context of alternate scene headers
-                        if alt_code in {0x01, 0x0A, 0x0B, 0x18}:
-                            break
-                        # valid commands if data2 is a valid segment offset
-                        # (the segment is always the scene file)
-                        if alt_code in {0x00, 0x03, 0x04, 0x06, 0x0E, 0x0F, 0x13}:
-                            if (data2 >> 24) != 0x02:
-                                break
-                            if (data2 & 0xFFFFFF) >= len(scene_data):
-                                break
-                    if alt_code == 0x14:
-                        header_offsets.append(alternate_header_offset)
-                    else:
-                        break
-            # find room list from all headers
-            for offset in header_offsets:
-                print("  Header 0x{:06X}".format(offset))
-                code = None
-                while code != 0x14:
-                    (code, data1, data2) = scene_header_command_struct.unpack_from(
-                        scene_data, offset
-                    )
-                    offset += scene_header_command_struct.size
-                    if code != 0x04:
-                        continue
-                    room_list_length = data1
-                    assert room_list_length == len(room_list)
-                    room_list_segment_offset = data2
-                    assert (room_list_segment_offset >> 24) == 0x02
-                    room_list_offset = room_list_segment_offset & 0xFFFFFF
-                    assert (
-                        room_list_offset + room_list_length * rom_file_struct.size
-                        <= len(scene_data)
-                    )
-                    for room_index, room_file in enumerate(room_list):
-                        rom_file_struct.pack_into(
-                            scene_data,
-                            room_list_offset + room_index * rom_file_struct.size,
-                            room_file.dma_entry.vrom_start,
-                            room_file.dma_entry.vrom_end,
-                        )
-                        print("    Room {}".format(room_index), room_file.dma_entry)
-            scene_table_entry.scene_file.data = scene_data
-
     def write(self, out):
         rom_data = bytearray(
             max(file.dma_entry.rom_start + len(file.data) for file in self.files)
@@ -808,12 +595,13 @@ class ModuleInfo:
         self,
         task,  # type: str
         register,  # type: Callable[[PyRTInterface],None]
-        task_dependencies={},  # type: Set[str]
+        task_dependencies=frozenset(),  # type: Set[str]
         description="",  # type: str
     ):
         self.task = task
         self.register = register
         self.task_dependencies = task_dependencies
+        assert type(self.task_dependencies) in {set, frozenset}
         self.description = description
 
     def __repr__(self) -> str:
@@ -890,6 +678,7 @@ class PyRTInterface:
         self.event_listeners = (
             dict()
         )  # type: Dict[PyRTEvent, List[Callable[[PyRTInterface],None]]]
+        self.can_add_event_listeners = False
 
     def load_modules(self):
         import importlib
@@ -933,31 +722,55 @@ class PyRTInterface:
                 self.modules.append(module)
 
     def register_modules(self):
+        registered_modules = dict()  # type: Dict[str, ModuleType]
         unregistered_modules = {
             module.pyrt_module_info.task: module for module in self.modules
-        }
+        }  # type: Dict[str, ModuleType]
+
         while unregistered_modules:
             # find a module with no unregistered dependency
             registerable_module_item = next(
                 (
                     (module_task, module)
                     for module_task, module in unregistered_modules.items()
-                    if not (
-                        module.pyrt_module_info.task_dependencies
-                        & unregistered_modules.keys()
+                    if module.pyrt_module_info.task_dependencies.isdisjoint(
+                        unregistered_modules.keys()
                     )
                 ),
                 None,
             )
             if registerable_module_item is None:
-                print("Can't solve dependencies for remaining modules.")
-                print("Skipping registration of:")
-                print(unregistered_modules)
-                break
+                raise Exception(
+                    "Can't solve dependencies for remaining modules: "
+                    + repr(unregistered_modules)
+                )
             module_task, module = registerable_module_item
+            if not module.pyrt_module_info.task_dependencies.issubset(
+                registered_modules.keys()
+            ):
+                raise Exception(
+                    "Module "
+                    + repr(module.pyrt_module_info)
+                    + " has unknown dependencies "
+                    + str(
+                        module.pyrt_module_info.task_dependencies.difference(
+                            registered_modules.keys()
+                        )
+                    )
+                )
             module_info = module.pyrt_module_info  # type: ModuleInfo
+
+            # Only allow adding event listeners on module registration.
+            # Since modules are registred in dependency order, and event
+            # listeners callbacks are called in the order they were
+            # registered in, this ensures calling event listeners callbacks
+            # in the correct order with respect to dependencies.
+            self.can_add_event_listeners = True
             module_info.register(self)
+            self.can_add_event_listeners = False
+
             del unregistered_modules[module_task]
+            registered_modules[module_task] = module
 
     def register_event(
         self,
@@ -983,13 +796,16 @@ class PyRTInterface:
         event,  # type: PyRTEvent
         callback,  # type: Callable[[PyRTInterface],None]
     ):
+        if not self.can_add_event_listeners:
+            raise Exception("Cannot add event listeners at this time.")
         event_listeners = self.event_listeners.get(event)
         if event_listeners is None:
-            import sys
-
-            print(repr(self.event_listeners), file=sys.stderr)
-            print(id(event), file=sys.stderr)
-            print([id(ev) for ev in self.event_listeners], file=sys.stderr)
+            print("self.event_listeners =", repr(self.event_listeners))
+            print("id(event) =", id(event))
+            print(
+                "id(self.event_listeners.keys()) =",
+                [id(ev) for ev in self.event_listeners],
+            )
             raise ValueError("Event not registered: " + repr(event))
         event_listeners.append(callback)
 
@@ -1022,7 +838,6 @@ def main():
     rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
     rom.file_code = rom.files[rom.version_info.dmaentry_index_code]
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
-    rom.rooms_by_scene = rom.parse_scene_headers()
     rom.find_unaccounted(rom.data)
 
     move_vrom = True
@@ -1031,7 +846,7 @@ def main():
     rom.realloc_moveable_vrom(move_vrom)
     rom.realloc_moveable_rom(move_rom)
 
-    # update tables
+    # update stuff
 
     rom.pack_dma_table()
 
@@ -1040,9 +855,6 @@ def main():
     pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
 
     rom.file_code.data = rom.code_data
-
-    # update scene headers
-    rom.pack_room_lists()
 
     with open("oot-build.z64", "wb") as f:
         rom.write(f)
