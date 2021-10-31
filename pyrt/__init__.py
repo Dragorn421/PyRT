@@ -873,13 +873,21 @@ class PyRTInterface:
             dict()
         )  # type: Dict[PyRTEvent, List[Callable[[PyRTInterface],None]]]
 
-    def load_modules(self, dir_name):
+    def load_modules(self):
         import importlib
+
+        modules_dir_path = os.path.dirname(__file__)
+        print("Looking for modules in", modules_dir_path)
+        print("__package__ =", __package__)
 
         module_names_by_task = dict()
 
-        with os.scandir(os.path.join(".", dir_name)) as dir_iter:
+        with os.scandir(modules_dir_path) as dir_iter:
             for dir_entry in dir_iter:
+                # skip __pycache__ and __init__.py more explicitly
+                if dir_entry.name.startswith("_"):
+                    print("Skipping", dir_entry.path, "(_ prefix)")
+                    continue
                 if not dir_entry.is_file():
                     print("Skipping", dir_entry.path, "(not a file)")
                     continue
@@ -888,7 +896,7 @@ class PyRTInterface:
                     continue
                 module_name = dir_entry.name[: -len(".py")]
                 print("Loading", module_name)
-                module = importlib.import_module(dir_name + "." + module_name)
+                module = importlib.import_module("." + module_name, __package__)
                 if not hasattr(module, "pyrt_module_info"):
                     print("Skipping module", module_name, "(no pyrt_module_info)")
                     continue
@@ -979,7 +987,7 @@ def main():
     pyrti.register_event(EVENT_DMA_LOAD_DONE)
     pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
 
-    pyrti.load_modules("pyrt")
+    pyrti.load_modules()
     pyrti.register_modules()
 
     dma_entries = rom.parse_dma_table(rom.data)
