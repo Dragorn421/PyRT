@@ -110,6 +110,17 @@ class Allocator:
                     i += 1
         self.free_ranges.append((start, end))
 
+    def __str__(self):
+        return "Free: {} Tail: {}".format(
+            ",".join("0x{:X}-0x{:X}".format(start, end) for start, end in self.free_ranges),
+            "None" if self.tail_range_start is None else "0x{:X}".format(self.tail_range_start),
+        )
+
+    def __repr__(self):
+        return "Allocator(free_ranges={!r}, tail_range_start={!r})".format(
+            self.free_ranges, self.tail_range_start
+        )
+
 
 dma_entry_struct = struct.Struct(">IIII")
 assert dma_entry_struct.size == 0x10
