@@ -29,133 +29,86 @@ if TYPE_CHECKING:
 import os
 
 import struct
-import bisect
+import math
 
 
-class Ranges:
-    def __init__(
-        self,
-        ranges=[],  # type: List[Tuple[int,int]]
-    ):
-        """
-        ranges is a list of (start, end) tuples, sorted like
-        ranges[i] start < ranges[i] end < ranges[i+1] start
-        (the class methods maintain that order)
-        """
-        self.ranges = ranges
+class AllocatorOutOfFreeRanges(Exception):
+    pass
 
-    def add_range(self, add_start, add_end):
-        ranges = self.ranges
 
-        # ranges[i-1] end < add_start <= ranges[i] end
-        i = bisect.bisect_left([end for start, end in ranges], add_start)
+class Allocator:
+    def __init__(self, free_ranges=None, tail_range_start=None):
+        self.free_ranges = free_ranges if free_ranges else []
+        self.tail_range_start = tail_range_start
 
-        while i < len(ranges):
-            start, end = ranges[i]
-            if add_end < start:
-                break
-            if add_start > start:
-                add_start = start
-            if add_end < end:
-                add_end = end
-            self.ranges.pop(i)
-        self.ranges.insert(i, (add_start, add_end))
+    def alloc(self, size, align=1):
+        assert size > 0
+        assert align >= 1
 
-    def exclude_range(self, exclude_start, exclude_end):
-        ranges = self.ranges
+        for i, (range_start, range_end) in enumerate(self.free_ranges):
+            range_start_aligned = math.ceil(range_start / align) * align
+            if (range_end - range_start_aligned) >= size:
+                alloc_range_start = range_start_aligned
+                alloc_range_end = alloc_range_start + size
+                self.free_ranges.pop(i)
+                if (alloc_range_start - range_start) > 0:
+                    self.free_ranges.append((range_start, alloc_range_start))
+                if (range_end - alloc_range_end) > 0:
+                    self.free_ranges.append((alloc_range_end, range_end))
+                return alloc_range_start, alloc_range_end
 
-        # ranges[i-1] end <= exclude_start < ranges[i] end
-        i = bisect.bisect_right([end for start, end in ranges], exclude_start)
+        if self.tail_range_start is None:
+            raise AllocatorOutOfFreeRanges
 
-        while i < len(ranges):
-            start, end = ranges[i]
-            # stop if range starts after exclude range ends
-            if exclude_end <= start:
-                break
+        prev_tail_range_start = self.tail_range_start
+        tail_range_start_aligned = math.ceil(prev_tail_range_start / align) * align
+        alloc_range_start = tail_range_start_aligned
+        alloc_range_end = alloc_range_start + size
+        self.tail_range_start = alloc_range_end
+        if (alloc_range_start - prev_tail_range_start) > 0:
+            self.free_ranges.append((prev_tail_range_start, alloc_range_start))
+        return alloc_range_start, alloc_range_end
 
-            # start < exclude_end
-            if exclude_start <= start and exclude_end >= end:
-                # exclude_start <= start <= end <= exclude_end
-                ranges.pop(i)  # range completely excluded
-            elif exclude_start >= start and exclude_end <= end:
-                # start <= exclude_start <= exclude_end <= end
-                ranges.pop(i)
-                if start != exclude_start:
-                    ranges.insert(i, (start, exclude_start))
+    def alloc_range(self, start, end):
+        i = 0
+        while i < len(self.free_ranges):
+            range_start, range_end = self.free_ranges[i]
+            if start <= range_start:
+                if end > range_start:
+                    self.free_ranges.pop(i)
+                    if range_end > end:
+                        self.free_ranges.append((end, range_end))
+                else:  # end <= range_start
                     i += 1
-                if exclude_end != end:
-                    ranges.insert(i, (exclude_end, end))
+            else:  # start > range_start:
+                if start < range_end:
+                    self.free_ranges.pop(i)
+                    self.free_ranges.append((range_start, start))
+                    if range_end > end:
+                        self.free_ranges.append((end, range_end))
+                else:  # start >= range_end
                     i += 1
-            elif exclude_start >= start and exclude_start < end:
-                # start <= exclude_start < end (< exclude_end)
-                ranges.pop(i)
-                if start != exclude_start:
-                    ranges.insert(i, (start, exclude_start))
+
+    def free(self, start, end):
+        i = 0
+        while i < len(self.free_ranges):
+            range_start, range_end = self.free_ranges[i]
+            if start <= range_start:
+                if end >= range_start:
+                    self.free_ranges.pop(i)
+                    if range_end > end:
+                        end = range_end
+                else:  # end < range_start
                     i += 1
-            elif exclude_end > start and exclude_end <= end:
-                # (exclude_start <) start < exclude_end <= end
-                ranges.pop(i)
-                if exclude_end != end:
-                    ranges.insert(i, (exclude_end, end))
+            else:  # start > range_start:
+                if start <= range_end:
+                    self.free_ranges.pop(i)
+                    start = range_start
+                    if range_end > end:
+                        end = range_end
+                else:  # start > range_end
                     i += 1
-            else:
-                # disjointed intervals
-                raise AssertionError(
-                    "disjointed: {:X}-{:X} {:X}-{:X}".format(
-                        start, end, exclude_start, exclude_end
-                    )
-                )
-
-    def __repr__(self):
-        return "Ranges({!r})".format(self.ranges)
-
-    def __str__(self):
-        return "Ranges " + ",".join(
-            "{:X}-{:X}".format(start, end) for start, end in self.ranges
-        )
-
-
-class RangesAscendingLength:
-    def __init__(
-        self,
-        ranges,  # type: List[Tuple[int,int]]
-    ):
-        self.ranges = ranges
-        self.ranges.sort(key=lambda range_limits: range_limits[1] - range_limits[0])
-
-    def find_and_exclude_range(self, length):
-        """
-        length = end - start
-        maintains (ranges[i] length) < (ranges[i+1] length)
-        """
-        ranges = self.ranges
-
-        # ranges[i-1] length < length <= ranges[i] length
-        i = bisect.bisect_left([end - start for start, end in ranges], length)
-
-        start, end = ranges.pop(i)
-        exclude_start = start
-        exclude_end = start + length
-
-        remain_start = exclude_end
-        remain_end = end
-        remain_length = remain_end - remain_start
-        if remain_length != 0:
-            # ranges[i-1] length < remain_length <= ranges[i] length
-            i = bisect.bisect_left(
-                [end - start for start, end in ranges], remain_length
-            )
-            ranges.insert(i, (remain_start, remain_end))
-
-        return exclude_start, exclude_end
-
-    def __repr__(self):
-        return "RangesAscendingLength({!r})".format(self.ranges)
-
-    def __str__(self):
-        return "RangesAscendingLength " + ",".join(
-            "{:X}-{:X}".format(start, end) for start, end in self.ranges
-        )
+        self.free_ranges.append((start, end))
 
 
 dma_entry_struct = struct.Struct(">IIII")
@@ -458,28 +411,20 @@ class ROM:
         self.realloc_vrom(max_vrom, moveable_vrom)
 
     def realloc_vrom(self, max_vrom, moveable_vrom):
-        # strands where vrom isn't taken by an "immoveable vrom file"
-        dynamic_vrom_ranges = Ranges()
-        dynamic_vrom_ranges.add_range(0, max_vrom)
+        # find strands where vrom isn't taken by an "immoveable vrom file"
+        vrom_allocator = Allocator()
+        vrom_allocator.free(0, max_vrom)
 
         for file in self.files:
             if file not in moveable_vrom:
                 vrom_start = file.dma_entry.vrom_start
                 vrom_end = file.dma_entry.vrom_end
-                dynamic_vrom_ranges.exclude_range(vrom_start, vrom_end)
+                vrom_allocator.alloc_range(vrom_start, vrom_end)
                 # the vrom offsets of this file won't be updated,
                 # check now if the file fits the reserved vrom
                 assert len(file.data) == (vrom_end - vrom_start)
 
-        print("dynamic_vrom_ranges =", dynamic_vrom_ranges)
-
-        # FIXME handle alignment somewhere
-
-        # sort ranges from smallest to largest
-        free_vrom_ranges = RangesAscendingLength(dynamic_vrom_ranges.ranges)
-        del dynamic_vrom_ranges
-
-        print("free_vrom_ranges =", free_vrom_ranges)
+        print("vrom_allocator =", vrom_allocator)
 
         # sort files from largest to smallest
         # If same size, sort by name. This makes the ordering consistent across
@@ -495,7 +440,8 @@ class ROM:
         # fit moveable vrom files in the space highlighted by dynamic_vrom_ranges,
         # shrinking those ranges as we go
         for file in moveable_vrom_sorted:
-            start, end = free_vrom_ranges.find_and_exclude_range(len(file.data))
+            # TODO is 16-align needed for vrom?
+            start, end = vrom_allocator.alloc(len(file.data), 0x10)
             file.dma_entry.vrom_start = start
             file.dma_entry.vrom_end = end
             print("VROM> {}".format(file.dma_entry))
@@ -521,24 +467,18 @@ class ROM:
         self.realloc_rom(max_rom, moveable_rom)
 
     def realloc_rom(self, max_rom, moveable_rom):
-        # strands where rom isn't taken by an "immoveable rom file"
-        dynamic_rom_ranges = Ranges()
-        dynamic_rom_ranges.add_range(0, max_rom)
+        # find strands where rom isn't taken by an "immoveable rom file"
+        rom_allocator = Allocator()
+        rom_allocator.free(0, max_rom)
 
         for file in self.files:
             if file not in moveable_rom:
-                dynamic_rom_ranges.exclude_range(
+                rom_allocator.alloc_range(
                     file.dma_entry.rom_start,
                     file.dma_entry.rom_start + len(file.data),
                 )
 
-        print("dynamic_rom_ranges =", dynamic_rom_ranges)
-
-        # sort ranges from smallest to largest
-        free_rom_ranges = RangesAscendingLength(dynamic_rom_ranges.ranges)
-        del dynamic_rom_ranges
-
-        print("free_rom_ranges =", free_rom_ranges)
+        print("rom_allocator =", rom_allocator)
 
         # sort files from largest to smallest
         moveable_rom_sorted = list(moveable_rom)
@@ -551,7 +491,7 @@ class ROM:
         # fit moveable rom files in the space highlighted by dynamic_rom_ranges,
         # shrinking those ranges as we go
         for file in moveable_rom_sorted:
-            start, end = free_rom_ranges.find_and_exclude_range(len(file.data))
+            start, end = rom_allocator.alloc(len(file.data), 0x10)
             file.dma_entry.rom_start = start
             file.dma_entry.rom_end = 0  # TODO ?
             print("ROM> {}".format(file.dma_entry))
@@ -838,7 +778,7 @@ def main():
     rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
     rom.file_code = rom.files[rom.version_info.dmaentry_index_code]
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
-    rom.find_unaccounted(rom.data)
+    # rom.find_unaccounted(rom.data)
 
     move_vrom = True
     move_rom = True
