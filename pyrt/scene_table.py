@@ -95,7 +95,7 @@ def pack_scene_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     rom = pyrti.rom
-    code_data = rom.code_data
+    code_data = rom.file_code.data
 
     # FIXME check max length
 

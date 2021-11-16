@@ -112,8 +112,12 @@ class Allocator:
 
     def __str__(self):
         return "Free: {} Tail: {}".format(
-            ",".join("0x{:X}-0x{:X}".format(start, end) for start, end in self.free_ranges),
-            "None" if self.tail_range_start is None else "0x{:X}".format(self.tail_range_start),
+            ",".join(
+                "0x{:X}-0x{:X}".format(start, end) for start, end in self.free_ranges
+            ),
+            "None"
+            if self.tail_range_start is None
+            else "0x{:X}".format(self.tail_range_start),
         )
 
     def __repr__(self):
@@ -198,6 +202,14 @@ class RomFile:
     ):
         self.data = data
         self.dma_entry = dma_entry
+
+
+class RomFileEditable(RomFile):
+    def __init__(self, rom_file, resizable):
+        self.data = bytearray(rom_file.data)
+        self.dma_entry = rom_file.dma_entry
+        self.resizable = resizable
+        self.allocator = Allocator(None, len(self.data) if resizable else None)
 
 
 class ActorOverlay:
@@ -784,10 +796,21 @@ def main():
             dma_entry,
         )
         rom.files.append(romfile)
+
     rom.file_makerom = rom.files[rom.version_info.dmaentry_index_makerom]
-    rom.file_boot = rom.files[rom.version_info.dmaentry_index_boot]
+
+    rom.file_boot = RomFileEditable(
+        rom.files[rom.version_info.dmaentry_index_boot], False
+    )
+    rom.files[rom.version_info.dmaentry_index_boot] = rom.file_boot
+
     rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
-    rom.file_code = rom.files[rom.version_info.dmaentry_index_code]
+
+    rom.file_code = RomFileEditable(
+        rom.files[rom.version_info.dmaentry_index_code], False
+    )
+    rom.files[rom.version_info.dmaentry_index_code] = rom.file_code
+
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
     # rom.find_unaccounted(rom.data)
 
@@ -801,11 +824,7 @@ def main():
 
     rom.pack_dma_table()
 
-    rom.code_data = bytearray(rom.file_code.data)
-
     pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
-
-    rom.file_code.data = rom.code_data
 
     with open("oot-build.z64", "wb") as f:
         rom.write(f)

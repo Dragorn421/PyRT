@@ -71,7 +71,7 @@ def pack_object_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     rom = pyrti.rom
-    code_data = rom.code_data
+    code_data = rom.file_code.data
 
     # FIXME check if not going past original table length
     u32_struct.pack_into(
