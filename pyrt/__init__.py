@@ -127,6 +127,36 @@ class Allocator:
         )
 
 
+def free_strings(
+    allocator,  # type: Allocator
+    ranges,  # type: List[Tuple]
+    data,  # type: bytes
+):
+    """
+    Mark as free the space used by the strings delimited by `ranges`,
+    also detect and mark as free zero padding (alignment) between strings.
+
+    The `ranges` argument will be sorted in-place
+    """
+    ranges.sort(key=lambda range: range[0])
+    for i, (start, end) in enumerate(ranges):
+        if i == 0:
+            free_stride_start = start
+            free_stride_end = end
+        else:
+            if (
+                free_stride_end <= start
+                and (start - free_stride_end) < 4
+                and set(data[free_stride_end:start]).issubset({0})
+            ):
+                free_stride_end = end
+            else:
+                allocator.free(free_stride_start, free_stride_end)
+                free_stride_start = start
+                free_stride_end = end
+    allocator.free(free_stride_start, free_stride_end)
+
+
 dma_entry_struct = struct.Struct(">IIII")
 assert dma_entry_struct.size == 0x10
 
@@ -473,6 +503,8 @@ class ROMReader:
             RomFile(data[boot_rom_start:boot_rom_end], boot_dma_entry_temp), False
         )
 
+        filename_boot_offset_ranges = []
+
         def get_filename(i):
             (filename_vram_start,) = u32_struct.unpack_from(
                 file_boot.data,
@@ -487,6 +519,11 @@ class ROMReader:
                 filename_boot_offset_end += 1
                 assert filename_boot_offset_end < len(file_boot.data)
                 assert (filename_boot_offset_end - filename_boot_offset_start) < 100
+
+            filename_boot_offset_ranges.append(
+                (filename_boot_offset_start, filename_boot_offset_end + 1)
+            )
+
             return file_boot.data[
                 filename_boot_offset_start:filename_boot_offset_end
             ].decode("ascii")
@@ -521,6 +558,9 @@ class ROMReader:
 
         file_boot.dma_entry = dma_entries[self.version_info.dmaentry_index_boot]
 
+        free_strings(file_boot.allocator, filename_boot_offset_ranges, file_boot.data)
+        print("file_boot.allocator =", file_boot.allocator)
+
         return dma_entries, file_boot
 
 
@@ -552,7 +592,25 @@ class ROMWriter:
                 dma_entry.rom_start,
                 dma_entry.rom_end,
             )
-            # FIXME use dma_entry.name
+
+            # update filename in the boot file array
+            # TODO it may be more appropriate to put this in a separate function,
+            # since it edits the boot file, not the dmadata file
+            (
+                filename_boot_offset_start,
+                filename_boot_offset_end,
+            ) = rom.file_boot.allocator.alloc(len(dma_entry.name) + 1)
+            rom.file_boot.data[filename_boot_offset_start:filename_boot_offset_end] = (
+                dma_entry.name.encode("ascii") + b"\x00"
+            )
+            filename_vram_start = (
+                rom.version_info.boot_vram_start + filename_boot_offset_start
+            )
+            u32_struct.pack_into(
+                rom.file_boot.data,
+                rom.version_info.dma_table_filenames_boot_offset + i * u32_struct.size,
+                filename_vram_start,
+            )
         rom.file_dmadata.data = dmadata_data
 
     def write(

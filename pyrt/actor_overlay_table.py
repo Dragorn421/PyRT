@@ -74,6 +74,8 @@ def parse_actor_overlay_table(
 ):
     rom = pyrti.rom
 
+    name_code_offset_ranges = []
+
     actor_overlay_table_length = rom.version_info.actor_overlay_table_length
     actor_overlay_table = [
         None
@@ -125,6 +127,11 @@ def parse_actor_overlay_table(
                 assert name_code_offset_end <= len(rom.file_code.data)
                 assert name_code_offset_end - name_code_offset_start < 100
 
+            # end + 1 to count the trailing '\0'
+            name_code_offset_ranges.append(
+                (name_code_offset_start, name_code_offset_end + 1)
+            )
+
             name = rom.file_code.data[
                 name_code_offset_start:name_code_offset_end
             ].decode("ascii")
@@ -147,6 +154,11 @@ def parse_actor_overlay_table(
             "{:03}".format(actor_id),
             actor_overlay if actor_overlay is not None else "-",
         )
+
+    pyrt.free_strings(
+        rom.file_code.allocator, name_code_offset_ranges, rom.file_code.data
+    )
+    print("rom.file_code.allocator =", rom.file_code.allocator)
 
     module_data = pyrti.modules_data[TASK]  # type: ActorOverlayTable
     module_data.actor_overlay_table = actor_overlay_table
@@ -177,10 +189,16 @@ def pack_actor_overlay_table(
             vram_start = actor_overlay.vram_start
             vram_end = actor_overlay.vram_end
             actor_init_vram_start = actor_overlay.actor_init_vram_start
-            # FIXME name_vram_start with actor_overlay.name
-            name_vram_start = rom.version_info.code_vram_start + code_data.index(
-                b"\x00"
+
+            (
+                name_code_offset_start,
+                name_code_offset_end,
+            ) = rom.file_code.allocator.alloc(len(actor_overlay.name) + 1)
+            rom.file_code.data[name_code_offset_start:name_code_offset_end] = (
+                actor_overlay.name.encode("ascii") + b"\x00"
             )
+            name_vram_start = rom.version_info.code_vram_start + name_code_offset_start
+
             alloc_type = actor_overlay.alloc_type
         else:
             vrom_start = 0
