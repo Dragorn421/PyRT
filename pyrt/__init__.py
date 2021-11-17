@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import List, Dict, Set, Tuple, Optional, Callable
     from types import ModuleType
+    import io
 
 import os
 
@@ -273,9 +274,26 @@ class ROM:
         self,
         version_info,  # type: VersionInfo
         data,  # type: bytes
+        files,  # type: List[RomFile]
     ):
         self.version_info = version_info
         self.data = data
+
+        self.file_makerom = files[self.version_info.dmaentry_index_makerom]
+
+        self.file_boot = files[
+            self.version_info.dmaentry_index_boot
+        ]  # type: RomFileEditable
+        assert type(self.file_boot) == RomFileEditable
+
+        self.file_dmadata = files[self.version_info.dmaentry_index_dmadata]
+
+        self.file_code = RomFileEditable(
+            files[self.version_info.dmaentry_index_code], False
+        )
+        files[self.version_info.dmaentry_index_code] = self.file_code
+
+        self.files = files
 
     def find_unaccounted(self, data):
         rom_size = len(data)
@@ -312,95 +330,6 @@ class ROM:
                 "0x{:08X}-0x{:08X} (end)".format(unaccounted_strand_start, rom_size),
                 set(data[unaccounted_strand_start:rom_size]),
             )
-
-    def parse_dma_table(self, data):
-
-        # read dmadata entry early, to get dma table length
-
-        (
-            dmadata_vrom_start,
-            dmadata_vrom_end,
-            dmadata_rom_start,
-            dmadata_rom_end,
-        ) = dma_entry_struct.unpack_from(
-            data,
-            self.version_info.dmadata_rom_start
-            + self.version_info.dmaentry_index_dmadata * dma_entry_struct.size,
-        )
-
-        assert dmadata_rom_start == self.version_info.dmadata_rom_start
-        assert dmadata_vrom_start <= dmadata_vrom_end
-        assert dmadata_rom_end == 0
-
-        dmadata_rom_end = dmadata_rom_start + (dmadata_vrom_end - dmadata_vrom_start)
-        assert dmadata_rom_end <= len(data)
-
-        # read boot entry early, to locate filenames
-
-        (
-            boot_vrom_start,
-            boot_vrom_end,
-            boot_rom_start,
-            boot_rom_end,
-        ) = dma_entry_struct.unpack_from(
-            data,
-            dmadata_rom_start
-            + self.version_info.dmaentry_index_boot * dma_entry_struct.size,
-        )
-
-        assert boot_vrom_start <= boot_vrom_end
-        assert boot_rom_end == 0
-
-        boot_rom_end = boot_rom_start + (boot_vrom_end - boot_vrom_start)
-        assert boot_rom_end <= len(data)
-
-        def get_filename(i):
-            (filename_vram_start,) = u32_struct.unpack_from(
-                data,
-                boot_rom_start
-                + self.version_info.dma_table_filenames_boot_offset
-                + i * u32_struct.size,
-            )
-            filename_rom_start = (
-                filename_vram_start - self.version_info.boot_vram_start + boot_rom_start
-            )
-            assert filename_rom_start < boot_rom_end
-            filename_rom_end = filename_rom_start
-            while data[filename_rom_end] != 0:
-                filename_rom_end += 1
-                assert filename_rom_end <= boot_rom_end
-                assert filename_rom_end - filename_rom_start < 100
-            return data[filename_rom_start:filename_rom_end].decode("ascii")
-
-        dma_entries = []  # type: List[DmaEntry]
-        dmaentry_rom_start = dmadata_rom_start
-        dmaentry_index = 0
-        while dmaentry_rom_start < dmadata_rom_end:
-            vrom_start, vrom_end, rom_start, rom_end = dma_entry_struct.unpack_from(
-                data, dmaentry_rom_start
-            )
-
-            if not (
-                vrom_start == 0 and vrom_end == 0 and rom_start == 0 and rom_end == 0
-            ):
-                assert vrom_start <= vrom_end
-                assert rom_end == 0
-                assert rom_start + (vrom_end - vrom_start) <= len(data)
-
-                dmaentry = DmaEntry(
-                    vrom_start,
-                    vrom_end,
-                    rom_start,
-                    rom_end,
-                    get_filename(dmaentry_index),
-                )
-                dma_entries.append(dmaentry)
-                print("{:04}".format(dmaentry_index), dmaentry)
-
-            dmaentry_rom_start += dma_entry_struct.size
-            dmaentry_index += 1
-
-        return dma_entries
 
     def find_file_by_vrom(self, vrom):
         matching_files = [
@@ -519,15 +448,151 @@ class ROM:
             file.dma_entry.rom_end = 0  # TODO ?
             print("ROM> {}".format(file.dma_entry))
 
-    def pack_dma_table(self):
-        assert self.file_makerom == self.files[self.version_info.dmaentry_index_makerom]
-        assert self.file_boot == self.files[self.version_info.dmaentry_index_boot]
-        assert self.file_dmadata == self.files[self.version_info.dmaentry_index_dmadata]
-        assert self.file_code == self.files[self.version_info.dmaentry_index_code]
 
-        dmadata_data = bytearray(len(self.file_dmadata.data))
+class ROMReader:
+    def __init__(self, version_info):
+        self.version_info = version_info
+
+    def read(self, data):
+        dma_entries, file_boot = self.parse_dma_table(data)
+
+        files = []  # type: List[RomFile]
+        for dma_entry in dma_entries:
+            rom_end = dma_entry.rom_start + (dma_entry.vrom_end - dma_entry.vrom_start)
+            romfile = RomFile(
+                data[dma_entry.rom_start : rom_end],
+                dma_entry,
+            )
+            files.append(romfile)
+
+        files[self.version_info.dmaentry_index_boot] = file_boot
+
+        rom = ROM(self.version_info, data, files)
+
+        return rom
+
+    def parse_dma_table(self, data):
+        # type: (bytes) -> Tuple[List[DmaEntry], RomFileEditable]
+
+        # read dmadata entry early, to get dma table length
+
+        (
+            dmadata_vrom_start,
+            dmadata_vrom_end,
+            dmadata_rom_start,
+            dmadata_rom_end,
+        ) = dma_entry_struct.unpack_from(
+            data,
+            self.version_info.dmadata_rom_start
+            + self.version_info.dmaentry_index_dmadata * dma_entry_struct.size,
+        )
+
+        assert dmadata_rom_start == self.version_info.dmadata_rom_start
+        assert dmadata_vrom_start <= dmadata_vrom_end
+        assert dmadata_rom_end == 0
+
+        dmadata_rom_end = dmadata_rom_start + (dmadata_vrom_end - dmadata_vrom_start)
+        assert dmadata_rom_end <= len(data)
+
+        # read boot entry early, to locate filenames
+
+        (
+            boot_vrom_start,
+            boot_vrom_end,
+            boot_rom_start,
+            boot_rom_end,
+        ) = dma_entry_struct.unpack_from(
+            data,
+            dmadata_rom_start
+            + self.version_info.dmaentry_index_boot * dma_entry_struct.size,
+        )
+
+        assert boot_vrom_start <= boot_vrom_end
+        assert boot_rom_end == 0
+
+        boot_dma_entry_temp = DmaEntry(
+            boot_vrom_start,
+            boot_vrom_end,
+            boot_rom_start,
+            boot_rom_end,
+        )
+
+        boot_rom_end = boot_rom_start + (boot_vrom_end - boot_vrom_start)
+        assert boot_rom_end <= len(data)
+
+        file_boot = RomFileEditable(
+            RomFile(data[boot_rom_start:boot_rom_end], boot_dma_entry_temp), False
+        )
+
+        def get_filename(i):
+            (filename_vram_start,) = u32_struct.unpack_from(
+                file_boot.data,
+                self.version_info.dma_table_filenames_boot_offset + i * u32_struct.size,
+            )
+            filename_boot_offset_start = (
+                filename_vram_start - self.version_info.boot_vram_start
+            )
+            assert filename_boot_offset_start < len(file_boot.data)
+            filename_boot_offset_end = filename_boot_offset_start
+            while file_boot.data[filename_boot_offset_end] != 0:
+                filename_boot_offset_end += 1
+                assert filename_boot_offset_end < len(file_boot.data)
+                assert (filename_boot_offset_end - filename_boot_offset_start) < 100
+            return file_boot.data[
+                filename_boot_offset_start:filename_boot_offset_end
+            ].decode("ascii")
+
+        dma_entries = []  # type: List[DmaEntry]
+        dmaentry_rom_start = dmadata_rom_start
+        dmaentry_index = 0
+        while dmaentry_rom_start < dmadata_rom_end:
+            vrom_start, vrom_end, rom_start, rom_end = dma_entry_struct.unpack_from(
+                data, dmaentry_rom_start
+            )
+
+            if not (
+                vrom_start == 0 and vrom_end == 0 and rom_start == 0 and rom_end == 0
+            ):
+                assert vrom_start <= vrom_end
+                assert rom_end == 0
+                assert rom_start + (vrom_end - vrom_start) <= len(data)
+
+                dmaentry = DmaEntry(
+                    vrom_start,
+                    vrom_end,
+                    rom_start,
+                    rom_end,
+                    get_filename(dmaentry_index),
+                )
+                dma_entries.append(dmaentry)
+                print("{:04}".format(dmaentry_index), dmaentry)
+
+            dmaentry_rom_start += dma_entry_struct.size
+            dmaentry_index += 1
+
+        file_boot.dma_entry = dma_entries[self.version_info.dmaentry_index_boot]
+
+        return dma_entries, file_boot
+
+
+class ROMWriter:
+    def __init__(
+        self,
+        rom,  # type: ROM
+    ):
+        self.rom = rom
+
+    def pack_dma_table(self):
+        rom = self.rom
+
+        assert rom.file_makerom == rom.files[rom.version_info.dmaentry_index_makerom]
+        assert rom.file_boot == rom.files[rom.version_info.dmaentry_index_boot]
+        assert rom.file_dmadata == rom.files[rom.version_info.dmaentry_index_dmadata]
+        assert rom.file_code == rom.files[rom.version_info.dmaentry_index_code]
+
+        dmadata_data = bytearray(len(rom.file_dmadata.data))
         print("Built DMA table:")
-        for i, file in enumerate(self.files):
+        for i, file in enumerate(rom.files):
             dma_entry = file.dma_entry
             print(dma_entry)
             dma_entry_struct.pack_into(
@@ -539,14 +604,19 @@ class ROM:
                 dma_entry.rom_end,
             )
             # FIXME use dma_entry.name
-        self.file_dmadata.data = dmadata_data
+        rom.file_dmadata.data = dmadata_data
 
-    def write(self, out):
+    def write(
+        self,
+        out,  # type: io.IOBase
+    ):
+        rom = self.rom
+
         rom_data = bytearray(
-            max(file.dma_entry.rom_start + len(file.data) for file in self.files)
+            max(file.dma_entry.rom_start + len(file.data) for file in rom.files)
         )
         print(len(rom_data))
-        for file in self.files:
+        for file in rom.files:
             rom_data[
                 file.dma_entry.rom_start : file.dma_entry.rom_start + len(file.data)
             ] = file.data
@@ -777,7 +847,11 @@ def main():
     version_info = version_info_mq_debug
     with open("oot-mq-debug.z64", "rb") as f:
         data = f.read()
-    rom = ROM(version_info, data)
+    rom_reader = ROMReader(version_info)
+
+    # TODO reading the rom should happen after modules are loaded
+    # (but currently the rom is an argument to construct PyRTInterface)
+    rom = rom_reader.read(data)
 
     pyrti = PyRTInterface(rom)
 
@@ -786,30 +860,6 @@ def main():
 
     pyrti.load_modules()
     pyrti.register_modules()
-
-    dma_entries = rom.parse_dma_table(rom.data)
-    rom.files = []
-    for dma_entry in dma_entries:
-        rom_end = dma_entry.rom_start + (dma_entry.vrom_end - dma_entry.vrom_start)
-        romfile = RomFile(
-            rom.data[dma_entry.rom_start : rom_end],
-            dma_entry,
-        )
-        rom.files.append(romfile)
-
-    rom.file_makerom = rom.files[rom.version_info.dmaentry_index_makerom]
-
-    rom.file_boot = RomFileEditable(
-        rom.files[rom.version_info.dmaentry_index_boot], False
-    )
-    rom.files[rom.version_info.dmaentry_index_boot] = rom.file_boot
-
-    rom.file_dmadata = rom.files[rom.version_info.dmaentry_index_dmadata]
-
-    rom.file_code = RomFileEditable(
-        rom.files[rom.version_info.dmaentry_index_code], False
-    )
-    rom.files[rom.version_info.dmaentry_index_code] = rom.file_code
 
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
     # rom.find_unaccounted(rom.data)
@@ -822,9 +872,11 @@ def main():
 
     # update stuff
 
-    rom.pack_dma_table()
-
     pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
 
+    rom_writer = ROMWriter(rom)
+    # TODO building the dma table in ROMWriter feels weird
+    rom_writer.pack_dma_table()
+
     with open("oot-build.z64", "wb") as f:
-        rom.write(f)
+        rom_writer.write(f)
