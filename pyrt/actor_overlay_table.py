@@ -160,7 +160,10 @@ def pack_actor_overlay_table(
     rom = pyrti.rom
     code_data = rom.file_code.data
 
-    # FIXME check max length
+    assert (
+        len(module_data.actor_overlay_table)
+        <= rom.version_info.actor_overlay_table_length
+    )
 
     for actor_id, actor_overlay in enumerate(module_data.actor_overlay_table):
         if actor_overlay is not None:

@@ -138,7 +138,10 @@ def pack_scene_table(
     rom = pyrti.rom
     code_data = rom.file_code.data
 
-    # FIXME check max length
+    assert (
+        len(module_data.scene_table)
+        <= rom.version_info.scene_table_length
+    )
 
     for scene_id, scene_table_entry in enumerate(module_data.scene_table):
         scene_vrom_start = scene_table_entry.scene_file.dma_entry.vrom_start

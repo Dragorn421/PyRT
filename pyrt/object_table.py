@@ -35,6 +35,7 @@ rom_file_struct = pyrt.rom_file_struct
 
 class ObjectTable:
     def __init__(self):
+        self.object_table_length = None
         self.object_table = None  # type: List[Optional[pyrt.RomFile]]
 
 
@@ -75,6 +76,7 @@ def parse_object_table(
         )
 
     module_data = pyrti.modules_data[TASK]  # type: ObjectTable
+    module_data.object_table_length = object_table_length
     module_data.object_table = object_table
 
 
@@ -86,7 +88,10 @@ def pack_object_table(
     rom = pyrti.rom
     code_data = rom.file_code.data
 
-    # FIXME check if not going past original table length
+    # TODO allow smaller object table. This uses == instead of <= to avoid
+    # permanent shortening (the length is read and written from the code file)
+    assert len(module_data.object_table) == module_data.object_table_length
+
     u32_struct.pack_into(
         code_data,
         rom.version_info.object_table_length_code_offset,
