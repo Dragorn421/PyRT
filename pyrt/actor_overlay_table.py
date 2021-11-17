@@ -35,6 +35,40 @@ actor_overlay_struct = struct.Struct(">IIIIIIIHbx")
 assert actor_overlay_struct.size == 0x20
 
 
+class ActorOverlayTable:
+    def __init__(self):
+        self.actor_overlay_table = None  # type: List[Optional[ActorOverlay]]
+
+
+class ActorOverlay:
+    def __init__(
+        self,
+        file,  # type: Optional[pyrt.RomFile]
+        vram_start,
+        vram_end,
+        actor_init_vram_start,
+        name,
+        alloc_type,
+    ):
+        self.file = file
+        self.vram_start = vram_start
+        self.vram_end = vram_end
+        self.actor_init_vram_start = actor_init_vram_start
+        self.name = name
+        self.alloc_type = alloc_type
+
+    def __str__(self):
+        return " ".join(
+            (
+                "{0.file.dma_entry}" if self.file else "internal",
+                "VRAM 0x{0.vram_start:08X}-0x{0.vram_end:08X}",
+                "init 0x{0.actor_init_vram_start:08X}",
+                "alloc {0.alloc_type}",
+                self.name,
+            )
+        ).format(self)
+
+
 def parse_actor_overlay_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
@@ -43,7 +77,7 @@ def parse_actor_overlay_table(
     actor_overlay_table_length = rom.version_info.actor_overlay_table_length
     actor_overlay_table = [
         None
-    ] * actor_overlay_table_length  # type: List[Optional[pyrt.ActorOverlay]]
+    ] * actor_overlay_table_length  # type: List[Optional[ActorOverlay]]
     for actor_id in range(actor_overlay_table_length):
         (
             vrom_start,
@@ -95,7 +129,7 @@ def parse_actor_overlay_table(
                 name_code_offset_start:name_code_offset_end
             ].decode("ascii")
 
-            actor_overlay = pyrt.ActorOverlay(
+            actor_overlay = ActorOverlay(
                 actor_overlay_file if is_overlay else None,
                 vram_start,
                 vram_end,
@@ -113,18 +147,22 @@ def parse_actor_overlay_table(
             "{:03}".format(actor_id),
             actor_overlay if actor_overlay is not None else "-",
         )
-    rom.actor_overlay_table = actor_overlay_table
+
+    module_data = pyrti.modules_data[TASK]  # type: ActorOverlayTable
+    module_data.actor_overlay_table = actor_overlay_table
 
 
 def pack_actor_overlay_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    module_data = pyrti.modules_data[TASK]  # type: ActorOverlayTable
+
     rom = pyrti.rom
     code_data = rom.file_code.data
 
     # FIXME check max length
 
-    for actor_id, actor_overlay in enumerate(rom.actor_overlay_table):
+    for actor_id, actor_overlay in enumerate(module_data.actor_overlay_table):
         if actor_overlay is not None:
             if actor_overlay.file is not None:
                 vrom_start = actor_overlay.file.dma_entry.vrom_start
@@ -170,12 +208,15 @@ def pack_actor_overlay_table(
 def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    pyrti.modules_data[TASK] = ActorOverlayTable()
     pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_actor_overlay_table)
     pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_actor_overlay_table)
 
 
+TASK = "actor overlay table"
+
 pyrt_module_info = pyrt.ModuleInfo(
-    task="actor overlay table",
+    task=TASK,
     description="Handles parsing and packing the actor overlay table.",
     register=register_pyrt_module,
 )

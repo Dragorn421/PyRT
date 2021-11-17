@@ -222,35 +222,6 @@ class RomFileEditable(RomFile):
         self.allocator = Allocator(None, len(self.data) if resizable else None)
 
 
-class ActorOverlay:
-    def __init__(
-        self,
-        file,  # type: Optional[RomFile]
-        vram_start,
-        vram_end,
-        actor_init_vram_start,
-        name,
-        alloc_type,
-    ):
-        self.file = file
-        self.vram_start = vram_start
-        self.vram_end = vram_end
-        self.actor_init_vram_start = actor_init_vram_start
-        self.name = name
-        self.alloc_type = alloc_type
-
-    def __str__(self):
-        return " ".join(
-            (
-                "{0.file.dma_entry}" if self.file else "internal",
-                "VRAM 0x{0.vram_start:08X}-0x{0.vram_end:08X}",
-                "init 0x{0.actor_init_vram_start:08X}",
-                "alloc {0.alloc_type}",
-                self.name,
-            )
-        ).format(self)
-
-
 class ROM:
     def __init__(
         self,

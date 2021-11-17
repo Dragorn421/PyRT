@@ -33,6 +33,11 @@ u32_struct = pyrt.u32_struct
 rom_file_struct = pyrt.rom_file_struct
 
 
+class ObjectTable:
+    def __init__(self):
+        self.object_table = None  # type: List[Optional[pyrt.RomFile]]
+
+
 def parse_object_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
@@ -68,12 +73,16 @@ def parse_object_table(
             "{:03}".format(object_id),
             object_file.dma_entry if object_file is not None else "-",
         )
-    rom.object_table = object_table
+
+    module_data = pyrti.modules_data[TASK]  # type: ObjectTable
+    module_data.object_table = object_table
 
 
 def pack_object_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    module_data = pyrti.modules_data[TASK]  # type: ObjectTable
+
     rom = pyrti.rom
     code_data = rom.file_code.data
 
@@ -81,9 +90,9 @@ def pack_object_table(
     u32_struct.pack_into(
         code_data,
         rom.version_info.object_table_length_code_offset,
-        len(rom.object_table),
+        len(module_data.object_table),
     )
-    for object_id, file in enumerate(rom.object_table):
+    for object_id, file in enumerate(module_data.object_table):
         if file is not None:
             vrom_start = file.dma_entry.vrom_start
             vrom_end = file.dma_entry.vrom_end
@@ -102,12 +111,15 @@ def pack_object_table(
 def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    pyrti.modules_data[TASK] = ObjectTable()
     pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_object_table)
     pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_object_table)
 
 
+TASK = "object table"
+
 pyrt_module_info = pyrt.ModuleInfo(
-    task="object table",
+    task=TASK,
     description="Handles parsing and packing the object table.",
     register=register_pyrt_module,
 )
