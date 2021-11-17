@@ -704,14 +704,16 @@ EVENT_ROM_VROM_REALLOC_DONE = PyRTEvent(
 class PyRTInterface:
     def __init__(
         self,
-        rom,  # type: ROM
     ):
-        self.rom = rom
+        self.rom = None  # type: ROM
         self.modules = []  # type: List[ModuleType]
         self.event_listeners = (
             dict()
         )  # type: Dict[PyRTEvent, List[Callable[[PyRTInterface],None]]]
         self.can_add_event_listeners = False
+
+    def set_rom(self, rom):
+        self.rom = rom
 
     def load_modules(self):
         import importlib
@@ -844,22 +846,23 @@ class PyRTInterface:
 
 
 def main():
-    version_info = version_info_mq_debug
-    with open("oot-mq-debug.z64", "rb") as f:
-        data = f.read()
-    rom_reader = ROMReader(version_info)
-
-    # TODO reading the rom should happen after modules are loaded
-    # (but currently the rom is an argument to construct PyRTInterface)
-    rom = rom_reader.read(data)
-
-    pyrti = PyRTInterface(rom)
+    pyrti = PyRTInterface()
 
     pyrti.register_event(EVENT_DMA_LOAD_DONE)
     pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
 
     pyrti.load_modules()
     pyrti.register_modules()
+
+    with open("oot-mq-debug.z64", "rb") as f:
+        data = f.read()
+
+    version_info = version_info_mq_debug
+    rom_reader = ROMReader(version_info)
+
+    rom = rom_reader.read(data)
+
+    pyrti.set_rom(rom)
 
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
     # rom.find_unaccounted(rom.data)
