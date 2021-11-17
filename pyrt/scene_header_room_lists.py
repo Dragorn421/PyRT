@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import List, Dict
+    from . import scene_table
 
 import struct
 
@@ -36,6 +37,13 @@ rom_file_struct = pyrt.rom_file_struct
 
 scene_header_command_struct = struct.Struct(">BBxxI")
 assert scene_header_command_struct.size == 8
+
+
+class SceneHeaderRoomLists:
+    def __init__(self):
+        self.rooms_by_scene = (
+            None
+        )  # type: Dict[scene_table.SceneTableEntry, List[pyrt.RomFile]]
 
 
 def find_alternate_headers(scene_data):
@@ -105,8 +113,14 @@ def parse_scene_headers(
 ):
     rom = pyrti.rom
 
-    rooms_by_scene = dict()  # type: Dict[pyrt.SceneTableEntry, List[pyrt.RomFile]]
-    for scene_table_entry in rom.scene_table:
+    module_data_scene_table = pyrti.modules_data[
+        TASK_SCENE_TABLE
+    ]  # type: scene_table.SceneTable
+
+    rooms_by_scene = (
+        dict()
+    )  # type: Dict[scene_table.SceneTableEntry, List[pyrt.RomFile]]
+    for scene_table_entry in module_data_scene_table.scene_table:
         scene_data = scene_table_entry.scene_file.data
         header_offsets = [0] + find_alternate_headers(scene_data)
         # find room list from all headers
@@ -138,6 +152,8 @@ def parse_scene_headers(
                     assert room_vrom_start == room_file.dma_entry.vrom_start
                     assert room_vrom_end == room_file.dma_entry.vrom_end
                     room_list.append(room_file)
+
+                    room_file.moveable_vrom = True
             if scene_table_entry not in rooms_by_scene:
                 rooms_by_scene[scene_table_entry] = room_list
                 print(scene_table_entry)
@@ -151,15 +167,17 @@ def parse_scene_headers(
                 # TODO support different room lists for each header
                 # for now, just check that all room lists are the same
                 assert rooms_by_scene[scene_table_entry] == room_list
-    rom.rooms_by_scene = rooms_by_scene
+
+    module_data = pyrti.modules_data[TASK]  # type: SceneHeaderRoomLists
+    module_data.rooms_by_scene = rooms_by_scene
 
 
 def pack_room_lists(
     pyrti,  # type: pyrt.PyRTInterface
 ):
-    rom = pyrti.rom
+    module_data = pyrti.modules_data[TASK]  # type: SceneHeaderRoomLists
 
-    for scene_table_entry, room_list in rom.rooms_by_scene.items():
+    for scene_table_entry, room_list in module_data.rooms_by_scene.items():
         print("Scene ", scene_table_entry.scene_file.dma_entry)
         scene_data = bytearray(scene_table_entry.scene_file.data)
         header_offsets = [0] + find_alternate_headers(scene_data)
@@ -197,13 +215,17 @@ def pack_room_lists(
 def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    pyrti.modules_data[TASK] = SceneHeaderRoomLists()
     pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_scene_headers)
     pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_room_lists)
 
 
+TASK = "scene header room lists"
+TASK_SCENE_TABLE = "scene table"
+
 pyrt_module_info = pyrt.ModuleInfo(
-    task="scene header room lists",
-    task_dependencies={"scene table"},
+    task=TASK,
+    task_dependencies={TASK_SCENE_TABLE},
     description="Handles parsing and packing the room lists in scene headers.",
     register=register_pyrt_module,
 )

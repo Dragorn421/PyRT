@@ -23,7 +23,7 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import List, Dict, Set, Tuple, Optional, Callable
+    from typing import List, Dict, Set, Tuple, Optional, Callable, Any
     from types import ModuleType
     import io
 
@@ -147,6 +147,9 @@ version_info_mq_debug = VersionInfo(
     dmaentry_index_makerom=0,
     dmaentry_index_boot=1,
     dmaentry_index_dmadata=2,
+    dmaentry_index_audiobank=3,
+    dmaentry_index_audioseq=4,
+    dmaentry_index_audiotable=5,
     dmaentry_index_code=28,
     dmadata_rom_start=0x012F70,
     dma_table_filenames_boot_offset=0x00A06C - 0x001060,
@@ -200,15 +203,21 @@ class RomFile:
         self,
         data,  # type: bytes
         dma_entry,  # type: DmaEntry
+        moveable_rom=False,
+        moveable_vrom=False,
     ):
         self.data = data
         self.dma_entry = dma_entry
+        self.moveable_rom = moveable_rom
+        self.moveable_vrom = moveable_vrom
 
 
 class RomFileEditable(RomFile):
     def __init__(self, rom_file, resizable):
         self.data = bytearray(rom_file.data)
         self.dma_entry = rom_file.dma_entry
+        self.moveable_rom = rom_file.moveable_rom
+        self.moveable_vrom = rom_file.moveable_vrom
         self.resizable = resizable
         self.allocator = Allocator(None, len(self.data) if resizable else None)
 
@@ -238,33 +247,6 @@ class ActorOverlay:
                 "init 0x{0.actor_init_vram_start:08X}",
                 "alloc {0.alloc_type}",
                 self.name,
-            )
-        ).format(self)
-
-
-class SceneTableEntry:
-    def __init__(
-        self,
-        scene_file,  # type: RomFile
-        title_file,  # type: Optional[RomFile]
-        unk_10,
-        config,
-        unk_12,
-        unk_13,
-    ):
-        self.scene_file = scene_file
-        self.title_file = title_file
-        self.unk_10 = unk_10
-        self.config = config
-        self.unk_12 = unk_12
-        self.unk_13 = unk_13
-
-    def __str__(self):
-        return " ".join(
-            (
-                "Scene {0.scene_file.dma_entry}",
-                "Title {0.title_file.dma_entry}" if self.title_file else "untitled",
-                "{0.unk_10} {0.config:02} {0.unk_12} {0.unk_13}",
             )
         ).format(self)
 
@@ -342,19 +324,10 @@ class ROM:
 
     def realloc_moveable_vrom(self, move_vrom):
         # tag moveable files rom/vrom-wise
-        moveable_vrom = set()  # type: Set[RomFile]
         if move_vrom:
-            moveable_vrom.update(file for file in self.object_table if file is not None)
-            moveable_vrom.update(
-                actor_overlay.file
-                for actor_overlay in self.actor_overlay_table
-                if actor_overlay is not None and actor_overlay.file is not None
-            )
-            moveable_vrom.update(
-                scene_table_entry.scene_file for scene_table_entry in self.scene_table
-            )
-            for room_list in self.rooms_by_scene.values():
-                moveable_vrom.update(room_list)
+            moveable_vrom = set(file for file in self.files if file.moveable_vrom)
+        else:
+            moveable_vrom = set()
 
         # OoT's `DmaMgr_SendRequestImpl` limits the vrom to 64MB
         # https://github.com/zeldaret/oot/blob/f1d27bf6531fd6579d09dcf3078ee97c57b6fff1/src/boot/z_std_dma.c#L1864
@@ -399,17 +372,8 @@ class ROM:
             print("VROM> {}".format(file.dma_entry))
 
     def realloc_moveable_rom(self, move_rom):
-        # TODO can all other files really move?
         if move_rom:
-            moveable_rom = set(self.files)
-            moveable_rom.remove(self.file_makerom)
-            moveable_rom.remove(self.file_boot)
-            moveable_rom.remove(self.file_dmadata)
-            # TODO these audio files can move if the rom pointers in code are updated accordingly
-            # https://github.com/zeldaret/oot/blob/bf0f26db9b9c2325cea249d6c8e0ec3b5152bcd6/src/code/audio_load.c#L1109
-            moveable_rom.remove(self.files[3])  # Audiobank
-            moveable_rom.remove(self.files[4])  # Audioseq
-            moveable_rom.remove(self.files[5])  # Audiotable
+            moveable_rom = set(file for file in self.files if file.moveable_rom)
         else:
             moveable_rom = set()
 
@@ -468,6 +432,20 @@ class ROMReader:
         files[self.version_info.dmaentry_index_boot] = file_boot
 
         rom = ROM(self.version_info, data, files)
+
+        # TODO can all other files really move?
+        for file in rom.files:
+            file.moveable_rom = True
+
+        rom.file_makerom.moveable_rom = False
+        rom.file_boot.moveable_rom = False
+        rom.file_dmadata.moveable_rom = False
+
+        # TODO these audio files can move if the rom pointers in code are updated accordingly
+        # https://github.com/zeldaret/oot/blob/bf0f26db9b9c2325cea249d6c8e0ec3b5152bcd6/src/code/audio_load.c#L1109
+        rom.files[self.version_info.dmaentry_index_audiobank].moveable_rom = False
+        rom.files[self.version_info.dmaentry_index_audioseq].moveable_rom = False
+        rom.files[self.version_info.dmaentry_index_audiotable].moveable_rom = False
 
         return rom
 
@@ -707,6 +685,11 @@ class PyRTInterface:
     ):
         self.rom = None  # type: ROM
         self.modules = []  # type: List[ModuleType]
+
+        # module-specific usage, key should be ModuleInfo#task
+        # and value some instance-specific module data
+        self.modules_data = {}  # type: Dict[str, Any]
+
         self.event_listeners = (
             dict()
         )  # type: Dict[PyRTEvent, List[Callable[[PyRTInterface],None]]]
@@ -796,7 +779,7 @@ class PyRTInterface:
             module_info = module.pyrt_module_info  # type: ModuleInfo
 
             # Only allow adding event listeners on module registration.
-            # Since modules are registred in dependency order, and event
+            # Since modules are registered in dependency order, and event
             # listeners callbacks are called in the order they were
             # registered in, this ensures calling event listeners callbacks
             # in the correct order with respect to dependencies.

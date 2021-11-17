@@ -60,6 +60,10 @@ def parse_object_table(
             assert object_file.dma_entry.vrom_start == vrom_start
             assert object_file.dma_entry.vrom_end == vrom_end
         object_table[object_id] = object_file
+
+        if object_file is not None:
+            object_file.moveable_vrom = True
+
         print(
             "{:03}".format(object_id),
             object_file.dma_entry if object_file is not None else "-",

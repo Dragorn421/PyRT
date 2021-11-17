@@ -105,6 +105,10 @@ def parse_actor_overlay_table(
             )
 
         actor_overlay_table[actor_id] = actor_overlay
+
+        if actor_overlay is not None and actor_overlay.file is not None:
+            actor_overlay.file.moveable_vrom = True
+
         print(
             "{:03}".format(actor_id),
             actor_overlay if actor_overlay is not None else "-",
