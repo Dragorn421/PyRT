@@ -72,9 +72,13 @@ class ActorOverlay:
 def parse_actor_overlay_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    log = pyrti.logging_helper.get_logger(__name__)
+
     rom = pyrti.rom
 
     name_code_offset_ranges = []
+
+    log.info("Parsing the actor overlay table...")
 
     actor_overlay_table_length = rom.version_info.actor_overlay_table_length
     actor_overlay_table = [
@@ -150,15 +154,12 @@ def parse_actor_overlay_table(
         if actor_overlay is not None and actor_overlay.file is not None:
             actor_overlay.file.moveable_vrom = True
 
-        print(
-            "{:03}".format(actor_id),
-            actor_overlay if actor_overlay is not None else "-",
-        )
+        log.trace("{:03} {}", actor_id, actor_overlay)
 
     pyrt.free_strings(
         rom.file_code.allocator, name_code_offset_ranges, rom.file_code.data
     )
-    print("rom.file_code.allocator =", rom.file_code.allocator)
+    log.debug("rom.file_code.allocator = {}", rom.file_code.allocator)
 
     module_data = pyrti.modules_data[TASK]  # type: ActorOverlayTable
     module_data.actor_overlay_table = actor_overlay_table

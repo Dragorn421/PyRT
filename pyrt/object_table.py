@@ -42,6 +42,10 @@ class ObjectTable:
 def parse_object_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    log = pyrti.logging_helper.get_logger(__name__)
+
+    log.info("Parsing the object table...")
+
     rom = pyrti.rom
     (object_table_length,) = u32_struct.unpack_from(
         rom.file_code.data, rom.version_info.object_table_length_code_offset
@@ -70,8 +74,9 @@ def parse_object_table(
         if object_file is not None:
             object_file.moveable_vrom = True
 
-        print(
-            "{:03}".format(object_id),
+        log.trace(
+            "{:03} {}",
+            object_id,
             object_file.dma_entry if object_file is not None else "-",
         )
 

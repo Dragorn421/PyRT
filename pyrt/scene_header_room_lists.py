@@ -46,7 +46,7 @@ class SceneHeaderRoomLists:
         )  # type: Dict[scene_table.SceneTableEntry, List[pyrt.RomFile]]
 
 
-def find_alternate_headers(scene_data):
+def find_alternate_headers(scene_data, log):
     header_offsets = []
     offset = 0
     code = None
@@ -59,10 +59,8 @@ def find_alternate_headers(scene_data):
             continue
         assert (data2 >> 24) == 0x02
         alternate_headers_list_offset = data2 & 0xFFFFFF
-        print(
-            "alternate_headers_list_offset = {:06X}".format(
-                alternate_headers_list_offset
-            )
+        log.trace(
+            "alternate_headers_list_offset = {:06X}", alternate_headers_list_offset
         )
         while alternate_headers_list_offset + u32_struct.size <= len(scene_data):
             (alternate_header_segment_offset,) = u32_struct.unpack_from(
@@ -111,18 +109,22 @@ def find_alternate_headers(scene_data):
 def parse_scene_headers(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    log = pyrti.logging_helper.get_logger(__name__)
+
     rom = pyrti.rom
 
     module_data_scene_table = pyrti.modules_data[
         TASK_SCENE_TABLE
     ]  # type: scene_table.SceneTable
 
+    log.info("Parsing scene headers for room lists...")
+
     rooms_by_scene = (
         dict()
     )  # type: Dict[scene_table.SceneTableEntry, List[pyrt.RomFile]]
     for scene_table_entry in module_data_scene_table.scene_table:
         scene_data = scene_table_entry.scene_file.data
-        header_offsets = [0] + find_alternate_headers(scene_data)
+        header_offsets = [0] + find_alternate_headers(scene_data, log)
         # find room list from all headers
         for offset in header_offsets:
             code = None
@@ -156,12 +158,13 @@ def parse_scene_headers(
                     room_file.moveable_vrom = True
             if scene_table_entry not in rooms_by_scene:
                 rooms_by_scene[scene_table_entry] = room_list
-                print(scene_table_entry)
-                print(
+                log.trace(
+                    "{}\n{}",
+                    scene_table_entry,
                     "\n".join(
                         " #{:<2} {}".format(room_index, room.dma_entry)
                         for room_index, room in enumerate(room_list)
-                    )
+                    ),
                 )
             else:
                 # TODO support different room lists for each header
@@ -175,15 +178,17 @@ def parse_scene_headers(
 def pack_room_lists(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    log = pyrti.logging_helper.get_logger(__name__)
+
     module_data = pyrti.modules_data[TASK]  # type: SceneHeaderRoomLists
 
     for scene_table_entry, room_list in module_data.rooms_by_scene.items():
-        print("Scene ", scene_table_entry.scene_file.dma_entry)
+        log.trace("Scene {}", scene_table_entry.scene_file.dma_entry)
         scene_data = bytearray(scene_table_entry.scene_file.data)
-        header_offsets = [0] + find_alternate_headers(scene_data)
+        header_offsets = [0] + find_alternate_headers(scene_data, log)
         # find room list from all headers
         for offset in header_offsets:
-            print("  Header 0x{:06X}".format(offset))
+            log.trace("  Header 0x{:06X}", offset)
             code = None
             while code != 0x14:
                 (code, data1, data2) = scene_header_command_struct.unpack_from(
@@ -208,7 +213,7 @@ def pack_room_lists(
                         room_file.dma_entry.vrom_start,
                         room_file.dma_entry.vrom_end,
                     )
-                    print("    Room {}".format(room_index), room_file.dma_entry)
+                    log.trace("    Room {} {}", room_index, room_file.dma_entry)
         scene_table_entry.scene_file.data = scene_data
 
 

@@ -70,7 +70,11 @@ class SceneTableEntry:
 def parse_scene_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
+    log = pyrti.logging_helper.get_logger(__name__)
+
     rom = pyrti.rom
+
+    log.info("Parsing scene table...")
 
     scene_table_length = rom.version_info.scene_table_length
 
@@ -121,10 +125,7 @@ def parse_scene_table(
         if scene_table_entry.title_file is not None:
             scene_table_entry.title_file.moveable_vrom = True
 
-        print(
-            "{:03}".format(scene_id),
-            scene_table_entry if scene_table_entry is not None else "-",
-        )
+        log.trace("{:03} {}", scene_id, scene_table_entry)
 
     module_data = pyrti.modules_data[TASK]  # type: SceneTable
     module_data.scene_table = scene_table
@@ -138,10 +139,7 @@ def pack_scene_table(
     rom = pyrti.rom
     code_data = rom.file_code.data
 
-    assert (
-        len(module_data.scene_table)
-        <= rom.version_info.scene_table_length
-    )
+    assert len(module_data.scene_table) <= rom.version_info.scene_table_length
 
     for scene_id, scene_table_entry in enumerate(module_data.scene_table):
         scene_vrom_start = scene_table_entry.scene_file.dma_entry.vrom_start

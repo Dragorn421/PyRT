@@ -28,9 +28,79 @@ if TYPE_CHECKING:
     import io
 
 import os
+import logging
 
 import struct
 import math
+
+
+class LoggingHelper:
+    trace_level = 5
+
+    def __init__(self, root_logger_name):
+        logging.addLevelName(LoggingHelper.trace_level, "TRACE")
+
+        self.root_logger = logging.getLogger("%s.%s" % (__package__, root_logger_name))
+        self.root_logger_stream_handler = logging.StreamHandler()
+        self.root_logger_file_handler = None  # type: Optional[logging.FileHandler]
+        self.root_logger_formatter = logging.Formatter(
+            fmt="{asctime} {levelname:s} {name:s}.{funcName:s}: {message:s}",
+            style="{",
+        )
+        self.root_logger_formatter.default_time_format = "%H:%M:%S"
+
+        self.root_logger_stream_handler.setFormatter(self.root_logger_formatter)
+        self.root_logger.addHandler(self.root_logger_stream_handler)
+        self.root_logger.setLevel(1)  # actual level filtering is left to handlers
+
+        self.get_logger("LoggingHelper").debug("Logging OK")
+
+    def get_logger(self, name):
+        log = self.root_logger.getChild(name)
+
+        def trace(message, *args, **kwargs):
+            if log.isEnabledFor(LoggingHelper.trace_level):
+                log._log(LoggingHelper.trace_level, message, args, **kwargs)
+
+        log.trace = trace
+
+        def Logger_makeRecordWrapper(
+            name, level, fn, lno, msg, args, exc_info, func=None, extra=None, sinfo=None
+        ):
+            name = name[len(__package__) + 1 :]
+            self = log
+            record = logging.Logger.makeRecord(
+                self, name, level, fn, lno, msg, args, exc_info, func, sinfo
+            )
+
+            def LogRecord_getMessageNewStyleFormatting():
+                self = record
+                msg = str(self.msg)
+                args = self.args
+                if args:
+                    if not isinstance(args, tuple):
+                        args = (args,)
+                    msg = msg.format(*args)
+                return msg
+
+            record.getMessage = LogRecord_getMessageNewStyleFormatting
+            return record
+
+        log.makeRecord = Logger_makeRecordWrapper
+        return log
+
+    def set_console_level(self, level):
+        self.root_logger_stream_handler.setLevel(level)
+
+    def set_log_file(self, path):
+        if self.root_logger_file_handler is not None:
+            self.root_logger.removeHandler(self.root_logger_file_handler)
+            self.root_logger_file_handler = None
+        if path is not None:
+            self.root_logger_file_handler = logging.FileHandler(path, mode="w")
+            self.root_logger_file_handler.setFormatter(self.root_logger_formatter)
+            self.root_logger.addHandler(self.root_logger_file_handler)
+            self.root_logger_file_handler.setLevel(1)
 
 
 class AllocatorOutOfFreeRanges(Exception):
@@ -258,7 +328,10 @@ class ROM:
         version_info,  # type: VersionInfo
         data,  # type: bytes
         files,  # type: List[RomFile]
+        logging_helper=None,  # type: Optional[LoggingHelper]
     ):
+        self.log = None if logging_helper is None else logging_helper.get_logger("ROM")
+
         self.version_info = version_info
         self.data = data
 
@@ -301,18 +374,12 @@ class ROM:
                     unaccounted_strand_start = i
             else:
                 if prev_is_unaccounted:
-                    print(
-                        "0x{:08X}-0x{:08X}".format(unaccounted_strand_start, i),
-                        set(data[unaccounted_strand_start:i]),
-                    )
+                    yield (unaccounted_strand_start, i)
             prev_is_unaccounted = is_unaccounted[i]
             i += 1
 
         if prev_is_unaccounted:
-            print(
-                "0x{:08X}-0x{:08X} (end)".format(unaccounted_strand_start, rom_size),
-                set(data[unaccounted_strand_start:rom_size]),
-            )
+            yield (unaccounted_strand_start, rom_size)
 
     def find_file_by_vrom(self, vrom):
         matching_files = [
@@ -350,7 +417,10 @@ class ROM:
                 # check now if the file fits the reserved vrom
                 assert len(file.data) == (vrom_end - vrom_start)
 
-        print("vrom_allocator =", vrom_allocator)
+        if self.log is not None:
+            self.log.debug(
+                "After allocating immovable files: vrom_allocator = {}", vrom_allocator
+            )
 
         # sort files from largest to smallest
         # If same size, sort by name. This makes the ordering consistent across
@@ -363,6 +433,8 @@ class ROM:
             reverse=True,
         )
 
+        if self.log is not None:
+            self.log.trace("Reallocating vrom for vrom-moveable files")
         # fit moveable vrom files in the space highlighted by dynamic_vrom_ranges,
         # shrinking those ranges as we go
         for file in moveable_vrom_sorted:
@@ -370,7 +442,8 @@ class ROM:
             start, end = vrom_allocator.alloc(len(file.data), 0x10)
             file.dma_entry.vrom_start = start
             file.dma_entry.vrom_end = end
-            print("VROM> {}".format(file.dma_entry))
+            if self.log is not None:
+                self.log.trace("VROM> {}", file.dma_entry)
 
     def realloc_moveable_rom(self, move_rom):
         if move_rom:
@@ -395,7 +468,10 @@ class ROM:
                     file.dma_entry.rom_start + len(file.data),
                 )
 
-        print("rom_allocator =", rom_allocator)
+        if self.log is not None:
+            self.log.debug(
+                "After allocating immovable files: rom_allocator = {}", rom_allocator
+            )
 
         # sort files from largest to smallest
         moveable_rom_sorted = list(moveable_rom)
@@ -405,17 +481,28 @@ class ROM:
             reverse=True,
         )
 
+        if self.log is not None:
+            self.log.trace("Reallocating rom for rom-moveable files")
         # fit moveable rom files in the space highlighted by dynamic_rom_ranges,
         # shrinking those ranges as we go
         for file in moveable_rom_sorted:
             start, end = rom_allocator.alloc(len(file.data), 0x10)
             file.dma_entry.rom_start = start
             file.dma_entry.rom_end = 0  # TODO ?
-            print("ROM> {}".format(file.dma_entry))
+            if self.log is not None:
+                self.log.trace("ROM> {}", file.dma_entry)
 
 
 class ROMReader:
-    def __init__(self, version_info):
+    def __init__(
+        self,
+        version_info,
+        logging_helper=None,  # type: Optional[LoggingHelper]
+    ):
+        self.log = (
+            None if logging_helper is None else logging_helper.get_logger("ROMReader")
+        )
+
         self.version_info = version_info
 
     def read(self, data):
@@ -528,6 +615,9 @@ class ROMReader:
                 filename_boot_offset_start:filename_boot_offset_end
             ].decode("ascii")
 
+        if self.log is not None:
+            self.log.trace("Parsed DMA table:")
+
         dma_entries = []  # type: List[DmaEntry]
         dmaentry_rom_start = dmadata_rom_start
         dmaentry_index = 0
@@ -551,7 +641,8 @@ class ROMReader:
                     get_filename(dmaentry_index),
                 )
                 dma_entries.append(dmaentry)
-                print("{:04}".format(dmaentry_index), dmaentry)
+                if self.log is not None:
+                    self.log.trace("{:04} {}", dmaentry_index, dmaentry)
 
             dmaentry_rom_start += dma_entry_struct.size
             dmaentry_index += 1
@@ -559,7 +650,8 @@ class ROMReader:
         file_boot.dma_entry = dma_entries[self.version_info.dmaentry_index_boot]
 
         free_strings(file_boot.allocator, filename_boot_offset_ranges, file_boot.data)
-        print("file_boot.allocator =", file_boot.allocator)
+        if self.log is not None:
+            self.log.debug("file_boot.allocator = {}", file_boot.allocator)
 
         return dma_entries, file_boot
 
@@ -568,7 +660,12 @@ class ROMWriter:
     def __init__(
         self,
         rom,  # type: ROM
+        logging_helper=None,  # type: Optional[LoggingHelper]
     ):
+        self.log = (
+            None if logging_helper is None else logging_helper.get_logger("ROMReader")
+        )
+
         self.rom = rom
 
     def pack_dma_table(self):
@@ -580,10 +677,12 @@ class ROMWriter:
         assert rom.file_code == rom.files[rom.version_info.dmaentry_index_code]
 
         dmadata_data = bytearray(len(rom.file_dmadata.data))
-        print("Built DMA table:")
+        if self.log is not None:
+            self.log.trace("Built DMA table:")
         for i, file in enumerate(rom.files):
             dma_entry = file.dma_entry
-            print(dma_entry)
+            if self.log is not None:
+                self.log.trace(dma_entry)
             dma_entry_struct.pack_into(
                 dmadata_data,
                 i * dma_entry_struct.size,
@@ -622,7 +721,8 @@ class ROMWriter:
         rom_data = bytearray(
             max(file.dma_entry.rom_start + len(file.data) for file in rom.files)
         )
-        print(len(rom_data))
+        if self.log is not None:
+            self.log.debug("Written ROM size: {:X}", len(rom_data))
         for file in rom.files:
             rom_data[
                 file.dma_entry.rom_start : file.dma_entry.rom_start + len(file.data)
@@ -711,7 +811,11 @@ EVENT_ROM_VROM_REALLOC_DONE = PyRTEvent(
 class PyRTInterface:
     def __init__(
         self,
+        logging_helper,  # type: LoggingHelper
     ):
+        self.logging_helper = logging_helper
+        self.log = logging_helper.get_logger("PyRTInterface")
+
         self.rom = None  # type: ROM
         self.modules = []  # type: List[ModuleType]
 
@@ -730,9 +834,11 @@ class PyRTInterface:
     def load_modules(self):
         import importlib
 
+        log = self.log
+
         modules_dir_path = os.path.dirname(__file__)
-        print("Looking for modules in", modules_dir_path)
-        print("__package__ =", __package__)
+        log.debug("Looking for modules in {}", modules_dir_path)
+        log.debug("__package__ = {}", __package__)
 
         module_names_by_task = dict()
 
@@ -740,19 +846,19 @@ class PyRTInterface:
             for dir_entry in dir_iter:
                 # skip __pycache__ and __init__.py more explicitly
                 if dir_entry.name.startswith("_"):
-                    print("Skipping", dir_entry.path, "(_ prefix)")
+                    log.debug("Skipping {} (_ prefix)", dir_entry.path)
                     continue
                 if not dir_entry.is_file():
-                    print("Skipping", dir_entry.path, "(not a file)")
+                    log.warn("Skipping {} (not a file)", dir_entry.path)
                     continue
                 if not dir_entry.name.endswith(".py"):
-                    print("Skipping", dir_entry.path, "(not a .py file)")
+                    log.warn("Skipping {} (not a .py file)", dir_entry.path)
                     continue
                 module_name = dir_entry.name[: -len(".py")]
-                print("Loading", module_name)
+                log.debug("Loading {}", module_name)
                 module = importlib.import_module("." + module_name, __package__)
                 if not hasattr(module, "pyrt_module_info"):
-                    print("Skipping module", module_name, "(no pyrt_module_info)")
+                    log.warn("Skipping module {} (no pyrt_module_info)", module_name)
                     continue
                 module_info = module.pyrt_module_info  # type: ModuleInfo
                 if module_info.task in module_names_by_task:
@@ -769,6 +875,8 @@ class PyRTInterface:
                 self.modules.append(module)
 
     def register_modules(self):
+        log = self.log
+
         registered_modules = dict()  # type: Dict[str, ModuleType]
         unregistered_modules = {
             module.pyrt_module_info.task: module for module in self.modules
@@ -807,6 +915,8 @@ class PyRTInterface:
                 )
             module_info = module.pyrt_module_info  # type: ModuleInfo
 
+            log.debug("Registering module {!r}", module_info)
+
             # Only allow adding event listeners on module registration.
             # Since modules are registered in dependency order, and event
             # listeners callbacks are called in the order they were
@@ -831,11 +941,12 @@ class PyRTInterface:
         self,
         event,  # type: PyRTEvent
     ):
+        self.log.debug("Raising {}", event)
         for callback in self.event_listeners[event]:
             try:
                 callback(self)
             except Exception:
-                print("An error ocurred raising event =", repr(event))
+                self.log.fatal("An error ocurred raising event {!r}", event)
                 raise
 
     def add_event_listener(
@@ -847,9 +958,9 @@ class PyRTInterface:
             raise Exception("Cannot add event listeners at this time.")
         event_listeners = self.event_listeners.get(event)
         if event_listeners is None:
-            print("self.event_listeners =", repr(self.event_listeners))
-            print("id(event) =", id(event))
-            print(
+            self.log.debug("self.event_listeners =", repr(self.event_listeners))
+            self.log.debug("id(event) =", id(event))
+            self.log.debug(
                 "id(self.event_listeners.keys()) =",
                 [id(ev) for ev in self.event_listeners],
             )
@@ -858,26 +969,51 @@ class PyRTInterface:
 
 
 def main():
-    pyrti = PyRTInterface()
+    logging_helper = LoggingHelper("pyrt")
+    logging_helper.set_log_file("log.txt")
+    logging_helper.set_console_level(logging.INFO)
+    log = logging_helper.get_logger(__name__)
+
+    pyrti = PyRTInterface(logging_helper)
 
     pyrti.register_event(EVENT_DMA_LOAD_DONE)
     pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
 
+    log.info("Loading modules...")
     pyrti.load_modules()
+
+    log.info("Registering modules...")
     pyrti.register_modules()
 
+    log.info("Reading ROM...")
     with open("oot-mq-debug.z64", "rb") as f:
         data = f.read()
 
     version_info = version_info_mq_debug
-    rom_reader = ROMReader(version_info)
+    rom_reader = ROMReader(version_info, logging_helper)
 
     rom = rom_reader.read(data)
+
+    find_unaccounted = False
+    if find_unaccounted:
+        log.info("Unaccounted ROM ranges in the input ROM:")
+        log.info(
+            ",".join(
+                "0x{:08X}-0x{:08X}({})".format(
+                    start,
+                    end,
+                    ",".join(
+                        "0" if v == 0 else "0x{:X}".format(v)
+                        for v in set(data[start:end])
+                    ),
+                )
+                for start, end in rom.find_unaccounted(rom.data)
+            )
+        )
 
     pyrti.set_rom(rom)
 
     pyrti.raise_event(EVENT_DMA_LOAD_DONE)
-    # rom.find_unaccounted(rom.data)
 
     move_vrom = True
     move_rom = True
@@ -889,9 +1025,12 @@ def main():
 
     pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
 
-    rom_writer = ROMWriter(rom)
+    rom_writer = ROMWriter(rom, logging_helper)
     # TODO building the dma table in ROMWriter feels weird
     rom_writer.pack_dma_table()
 
+    log.info("Writing ROM...")
     with open("oot-build.z64", "wb") as f:
         rom_writer.write(f)
+
+    log.info("Done!")
