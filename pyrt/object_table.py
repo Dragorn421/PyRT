@@ -122,8 +122,8 @@ def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     pyrti.modules_data[TASK] = ObjectTable()
-    pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_object_table)
-    pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_object_table)
+    pyrti.add_event_listener(pyrt.EVENT_PARSE_ROM, parse_object_table)
+    pyrti.add_event_listener(pyrt.EVENT_PACK_ROM_AFTER_FILE_ALLOC, pack_object_table)
 
 
 TASK = "object table"

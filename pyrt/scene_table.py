@@ -169,8 +169,8 @@ def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     pyrti.modules_data[TASK] = SceneTable()
-    pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_scene_table)
-    pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_scene_table)
+    pyrti.add_event_listener(pyrt.EVENT_PARSE_ROM, parse_scene_table)
+    pyrti.add_event_listener(pyrt.EVENT_PACK_ROM_AFTER_FILE_ALLOC, pack_scene_table)
 
 
 TASK = "scene table"

@@ -656,17 +656,50 @@ class ROMReader:
         return dma_entries, file_boot
 
 
-class ROMWriter:
+class ROMPacker:
     def __init__(
         self,
         rom,  # type: ROM
         logging_helper=None,  # type: Optional[LoggingHelper]
     ):
         self.log = (
-            None if logging_helper is None else logging_helper.get_logger("ROMReader")
+            None if logging_helper is None else logging_helper.get_logger("ROMPacker")
         )
 
         self.rom = rom
+
+        self.filenames_vram_start = dict()  # type: Dict[str, int]
+
+    def pack_boot_alloc_filenames(self):
+        rom = self.rom
+
+        for file in rom.files:
+            dma_entry = file.dma_entry
+            name = dma_entry.name
+            (
+                filename_boot_offset_start,
+                filename_boot_offset_end,
+            ) = rom.file_boot.allocator.alloc(len(name) + 1)
+            rom.file_boot.data[filename_boot_offset_start:filename_boot_offset_end] = (
+                name.encode("ascii") + b"\x00"
+            )
+            filename_vram_start = (
+                rom.version_info.boot_vram_start + filename_boot_offset_start
+            )
+            self.filenames_vram_start[name] = filename_vram_start
+
+    def pack_boot_filenames(self):
+        rom = self.rom
+
+        for i, file in enumerate(rom.files):
+            dma_entry = file.dma_entry
+            # update filename in the boot file array
+            filename_vram_start = self.filenames_vram_start[dma_entry.name]
+            u32_struct.pack_into(
+                rom.file_boot.data,
+                rom.version_info.dma_table_filenames_boot_offset + i * u32_struct.size,
+                filename_vram_start,
+            )
 
     def pack_dma_table(self):
         rom = self.rom
@@ -690,25 +723,6 @@ class ROMWriter:
                 dma_entry.vrom_end,
                 dma_entry.rom_start,
                 dma_entry.rom_end,
-            )
-
-            # update filename in the boot file array
-            # TODO it may be more appropriate to put this in a separate function,
-            # since it edits the boot file, not the dmadata file
-            (
-                filename_boot_offset_start,
-                filename_boot_offset_end,
-            ) = rom.file_boot.allocator.alloc(len(dma_entry.name) + 1)
-            rom.file_boot.data[filename_boot_offset_start:filename_boot_offset_end] = (
-                dma_entry.name.encode("ascii") + b"\x00"
-            )
-            filename_vram_start = (
-                rom.version_info.boot_vram_start + filename_boot_offset_start
-            )
-            u32_struct.pack_into(
-                rom.file_boot.data,
-                rom.version_info.dma_table_filenames_boot_offset + i * u32_struct.size,
-                filename_vram_start,
             )
         rom.file_dmadata.data = dmadata_data
 
@@ -797,14 +811,32 @@ class PyRTEvent:
         return self.id + " - " + self.description
 
 
-EVENT_DMA_LOAD_DONE = PyRTEvent(
-    "DMA load done",
-    "After the DMA table has been parsed and the ROM split into the corresponding files.",
+EVENT_PARSE_ROM = PyRTEvent(
+    "Parse ROM",
+    "Find which files are what (eg scene or overlay), "
+    "after the dma table was parsed and the ROM split into files.",
 )
 
-EVENT_ROM_VROM_REALLOC_DONE = PyRTEvent(
-    "ROM/VROM realloc done",
-    "After the file offsets in VROM/ROM got updated.",
+EVENT_DUMP_FILES = PyRTEvent(
+    "Dump files",
+    "Write out files into an organized tree, outside of the ROM.",
+)
+
+EVENT_LOAD_FILES = PyRTEvent(
+    "Load files",
+    "Read files from a directory tree outside of the ROM.",
+)
+
+EVENT_PACK_ROM_BEFORE_FILE_ALLOC = PyRTEvent(
+    "Pack ROM (before file alloc)",
+    "Pack various data into files (before the file offsets in VROM/ROM get updated). "
+    "At this point ROM/VROM offsets are invalid, and files may be resized.",
+)
+
+EVENT_PACK_ROM_AFTER_FILE_ALLOC = PyRTEvent(
+    "Pack ROM (after file alloc)",
+    "Pack various data into files (after the file offsets in VROM/ROM get updated). "
+    "At this point ROM/VROM offsets are final, and files cannot be resized.",
 )
 
 
@@ -976,8 +1008,11 @@ def main():
 
     pyrti = PyRTInterface(logging_helper)
 
-    pyrti.register_event(EVENT_DMA_LOAD_DONE)
-    pyrti.register_event(EVENT_ROM_VROM_REALLOC_DONE)
+    pyrti.register_event(EVENT_PARSE_ROM)
+    pyrti.register_event(EVENT_DUMP_FILES)
+    pyrti.register_event(EVENT_LOAD_FILES)
+    pyrti.register_event(EVENT_PACK_ROM_BEFORE_FILE_ALLOC)
+    pyrti.register_event(EVENT_PACK_ROM_AFTER_FILE_ALLOC)
 
     log.info("Loading modules...")
     pyrti.load_modules()
@@ -1013,7 +1048,16 @@ def main():
 
     pyrti.set_rom(rom)
 
-    pyrti.raise_event(EVENT_DMA_LOAD_DONE)
+    pyrti.raise_event(EVENT_PARSE_ROM)
+
+    pyrti.raise_event(EVENT_DUMP_FILES)
+
+    pyrti.raise_event(EVENT_LOAD_FILES)
+
+    rom_packer = ROMPacker(rom, logging_helper)
+
+    rom_packer.pack_boot_alloc_filenames()
+    pyrti.raise_event(EVENT_PACK_ROM_BEFORE_FILE_ALLOC)
 
     move_vrom = True
     move_rom = True
@@ -1021,16 +1065,12 @@ def main():
     rom.realloc_moveable_vrom(move_vrom)
     rom.realloc_moveable_rom(move_rom)
 
-    # update stuff
-
-    pyrti.raise_event(EVENT_ROM_VROM_REALLOC_DONE)
-
-    rom_writer = ROMWriter(rom, logging_helper)
-    # TODO building the dma table in ROMWriter feels weird
-    rom_writer.pack_dma_table()
+    rom_packer.pack_boot_filenames()
+    rom_packer.pack_dma_table()
+    pyrti.raise_event(EVENT_PACK_ROM_AFTER_FILE_ALLOC)
 
     log.info("Writing ROM...")
     with open("oot-build.z64", "wb") as f:
-        rom_writer.write(f)
+        rom_packer.write(f)
 
     log.info("Done!")

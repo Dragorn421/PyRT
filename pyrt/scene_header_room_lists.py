@@ -221,8 +221,8 @@ def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     pyrti.modules_data[TASK] = SceneHeaderRoomLists()
-    pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_scene_headers)
-    pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_room_lists)
+    pyrti.add_event_listener(pyrt.EVENT_PARSE_ROM, parse_scene_headers)
+    pyrti.add_event_listener(pyrt.EVENT_PACK_ROM_AFTER_FILE_ALLOC, pack_room_lists)
 
 
 TASK = "scene header room lists"

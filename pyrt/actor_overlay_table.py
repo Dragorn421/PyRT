@@ -26,7 +26,7 @@ import pyrt
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import List, Optional
+    from typing import List, Optional, Dict
 
 import struct
 
@@ -38,6 +38,7 @@ assert actor_overlay_struct.size == 0x20
 class ActorOverlayTable:
     def __init__(self):
         self.actor_overlay_table = None  # type: List[Optional[ActorOverlay]]
+        self.names_vram_start = dict()  # type: Dict[str, int]
 
 
 class ActorOverlay:
@@ -165,6 +166,32 @@ def parse_actor_overlay_table(
     module_data.actor_overlay_table = actor_overlay_table
 
 
+def pack_actor_overlay_table_names(
+    pyrti,  # type: pyrt.PyRTInterface
+):
+    module_data = pyrti.modules_data[TASK]  # type: ActorOverlayTable
+
+    rom = pyrti.rom
+
+    for actor_overlay in module_data.actor_overlay_table:
+        if actor_overlay is None:
+            continue
+
+        name = actor_overlay.name
+        if name in module_data.names_vram_start:
+            continue
+
+        (
+            name_code_offset_start,
+            name_code_offset_end,
+        ) = rom.file_code.allocator.alloc(len(name) + 1)
+        rom.file_code.data[name_code_offset_start:name_code_offset_end] = (
+            name.encode("ascii") + b"\x00"
+        )
+        name_vram_start = rom.version_info.code_vram_start + name_code_offset_start
+        module_data.names_vram_start[name] = name_vram_start
+
+
 def pack_actor_overlay_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
@@ -190,16 +217,7 @@ def pack_actor_overlay_table(
             vram_start = actor_overlay.vram_start
             vram_end = actor_overlay.vram_end
             actor_init_vram_start = actor_overlay.actor_init_vram_start
-
-            (
-                name_code_offset_start,
-                name_code_offset_end,
-            ) = rom.file_code.allocator.alloc(len(actor_overlay.name) + 1)
-            rom.file_code.data[name_code_offset_start:name_code_offset_end] = (
-                actor_overlay.name.encode("ascii") + b"\x00"
-            )
-            name_vram_start = rom.version_info.code_vram_start + name_code_offset_start
-
+            name_vram_start = module_data.names_vram_start[actor_overlay.name]
             alloc_type = actor_overlay.alloc_type
         else:
             vrom_start = 0
@@ -231,8 +249,13 @@ def register_pyrt_module(
     pyrti,  # type: pyrt.PyRTInterface
 ):
     pyrti.modules_data[TASK] = ActorOverlayTable()
-    pyrti.add_event_listener(pyrt.EVENT_DMA_LOAD_DONE, parse_actor_overlay_table)
-    pyrti.add_event_listener(pyrt.EVENT_ROM_VROM_REALLOC_DONE, pack_actor_overlay_table)
+    pyrti.add_event_listener(pyrt.EVENT_PARSE_ROM, parse_actor_overlay_table)
+    pyrti.add_event_listener(
+        pyrt.EVENT_PACK_ROM_BEFORE_FILE_ALLOC, pack_actor_overlay_table_names
+    )
+    pyrti.add_event_listener(
+        pyrt.EVENT_PACK_ROM_AFTER_FILE_ALLOC, pack_actor_overlay_table
+    )
 
 
 TASK = "actor overlay table"
