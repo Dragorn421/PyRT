@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import List, Optional
 
+from pathlib import Path
+
 
 u32_struct = pyrt.u32_struct
 rom_file_struct = pyrt.rom_file_struct
@@ -85,6 +87,70 @@ def parse_object_table(
     module_data.object_table = object_table
 
 
+def dump_object_files(
+    pyrti,  # type: pyrt.PyRTInterface
+):
+    log = pyrti.logging_helper.get_logger(__name__)
+
+    module_data = pyrti.modules_data[TASK]  # type: ObjectTable
+
+    dump_root = Path("objects")
+    dump_root.mkdir(parents=True, exist_ok=True)
+
+    for object_id, file in enumerate(module_data.object_table):
+        if file is not None:
+            file_name = file.dma_entry.name
+        else:
+            file_name = "unused"
+        dump_file_dirname = "{:03}__{}".format(object_id, file_name)
+        dump_file_dirpath = dump_root / dump_file_dirname
+        dump_file_dirpath.mkdir(parents=True, exist_ok=True)
+
+        if file is not None:
+            dump_file_path = dump_file_dirpath / "object.zobj"
+            with dump_file_path.open("wb") as dump_file:
+                dump_file.write(file.data)
+
+
+def load_object_files(
+    pyrti,  # type: pyrt.PyRTInterface
+):
+    log = pyrti.logging_helper.get_logger(__name__)
+
+    module_data = pyrti.modules_data[TASK]  # type: ObjectTable
+
+    rom = pyrti.rom
+
+    load_root = Path("objects")
+
+    for load_file_dirpath in load_root.iterdir():
+        assert load_file_dirpath.is_dir()
+        m = pyrt.leading_number.match(load_file_dirpath.name)
+        if m is None:
+            raise Exception(
+                "Can't find a leading number in directory name", load_file_dirpath.name
+            )
+        object_id_str = m[1]
+        object_id = int(object_id_str, 0)
+        assert object_id < len(module_data.object_table)
+        rom_file = module_data.object_table[object_id]
+        load_file_path = load_file_dirpath / "object.zobj"
+        if load_file_path.exists():
+            assert load_file_path.is_file()
+            with load_file_path.open("rb") as load_file:
+                data = load_file.read()
+
+            # TODO set dma_entry.name
+            if rom_file is None:
+                rom_file = rom.new_file(data)
+            else:
+                rom_file.data = data
+        else:
+            if rom_file is not None:
+                # TODO delete file from the rom as well
+                module_data.object_table[object_id] = None
+
+
 def pack_object_table(
     pyrti,  # type: pyrt.PyRTInterface
 ):
@@ -123,6 +189,8 @@ def register_pyrt_module(
 ):
     pyrti.modules_data[TASK] = ObjectTable()
     pyrti.add_event_listener(pyrt.EVENT_PARSE_ROM, parse_object_table)
+    pyrti.add_event_listener(pyrt.EVENT_DUMP_FILES, dump_object_files)
+    pyrti.add_event_listener(pyrt.EVENT_LOAD_FILES, load_object_files)
     pyrti.add_event_listener(pyrt.EVENT_PACK_ROM_AFTER_FILE_ALLOC, pack_object_table)
 
 

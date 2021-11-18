@@ -32,6 +32,7 @@ import logging
 
 import struct
 import math
+import re
 
 
 class LoggingHelper:
@@ -236,6 +237,8 @@ assert u32_struct.size == 4
 rom_file_struct = struct.Struct(">II")
 assert rom_file_struct.size == 8
 
+leading_number = re.compile(r"^0*(0x[0-9a-fA-F]+|[1-9][0-9]*|0)")
+
 
 class VersionInfo:
     def __init__(self, **kwargs):
@@ -390,12 +393,22 @@ class ROM:
         assert len(matching_files) == 1
         return matching_files[0]
 
+    def new_file(self, data, name=None):
+        dma_entry = DmaEntry(None, None, None, None, name)
+        rom_file = RomFile(data, dma_entry, True, True)
+        self.files.append(rom_file)
+        return rom_file
+
     def realloc_moveable_vrom(self, move_vrom):
-        # tag moveable files rom/vrom-wise
+        # tag moveable files in vrom
         if move_vrom:
             moveable_vrom = set(file for file in self.files if file.moveable_vrom)
         else:
-            moveable_vrom = set()
+            moveable_vrom = set(
+                file
+                for file in self.files
+                if file.moveable_vrom and file.dma_entry.vrom_start is None
+            )
 
         # OoT's `DmaMgr_SendRequestImpl` limits the vrom to 64MB
         # https://github.com/zeldaret/oot/blob/f1d27bf6531fd6579d09dcf3078ee97c57b6fff1/src/boot/z_std_dma.c#L1864
@@ -449,7 +462,11 @@ class ROM:
         if move_rom:
             moveable_rom = set(file for file in self.files if file.moveable_rom)
         else:
-            moveable_rom = set()
+            moveable_rom = set(
+                file
+                for file in self.files
+                if file.moveable_rom and file.dma_entry.rom_start is None
+            )
 
         # TODO is max_rom limited by anything apart from max_vrom to prevent eg a 128MB rom?
         max_rom = 0x4000000  # 64MB
@@ -673,9 +690,18 @@ class ROMPacker:
     def pack_boot_alloc_filenames(self):
         rom = self.rom
 
-        for file in rom.files:
+        for i, file in enumerate(rom.files):
             dma_entry = file.dma_entry
-            name = dma_entry.name
+            name = dma_entry.name  # type: str
+
+            if name is None:
+                # TODO not sure about how/where to handle default name
+                name = "#{}".format(i)
+                dma_entry.name = name
+
+            if name in self.filenames_vram_start:
+                continue
+
             (
                 filename_boot_offset_start,
                 filename_boot_offset_end,

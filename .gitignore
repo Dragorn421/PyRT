@@ -10,3 +10,7 @@ n64crc.c
 n64crc
 
 backups/
+
+tests/
+
+objects/
