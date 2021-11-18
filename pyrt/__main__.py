@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# Run PyRT with `python3 -m pyrt` in the directory where the pyrt directory is
 
 # Calling pyrt's main function from outside the pyrt module
 # allows cyclic imports to play nice instead of loading pyrt
@@ -14,5 +14,4 @@
 
 import pyrt
 
-if __name__ == "__main__":
-    pyrt.main()
+pyrt.main()
