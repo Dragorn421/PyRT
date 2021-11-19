@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     from types import ModuleType
     import io
 
-import os
 import logging
+from pathlib import Path
 
 import struct
 import math
@@ -894,43 +894,42 @@ class PyRTInterface:
 
         log = self.log
 
-        modules_dir_path = os.path.dirname(__file__)
+        modules_dir_path = Path(__file__).parent
         log.debug("Looking for modules in {}", modules_dir_path)
         log.debug("__package__ = {}", __package__)
 
         module_names_by_task = dict()
 
-        with os.scandir(modules_dir_path) as dir_iter:
-            for dir_entry in dir_iter:
-                # skip __pycache__ and __init__.py more explicitly
-                if dir_entry.name.startswith("_"):
-                    log.debug("Skipping {} (_ prefix)", dir_entry.path)
-                    continue
-                if not dir_entry.is_file():
-                    log.warn("Skipping {} (not a file)", dir_entry.path)
-                    continue
-                if not dir_entry.name.endswith(".py"):
-                    log.warn("Skipping {} (not a .py file)", dir_entry.path)
-                    continue
-                module_name = dir_entry.name[: -len(".py")]
-                log.debug("Loading {}", module_name)
-                module = importlib.import_module("." + module_name, __package__)
-                if not hasattr(module, "pyrt_module_info"):
-                    log.warn("Skipping module {} (no pyrt_module_info)", module_name)
-                    continue
-                module_info = module.pyrt_module_info  # type: ModuleInfo
-                if module_info.task in module_names_by_task:
-                    raise Exception(
-                        "Duplicate module task "
-                        + module_info.task
-                        + " (used by both "
-                        + module_names_by_task[module_info.task]
-                        + " and "
-                        + module_name
-                        + ")"
-                    )
-                module_names_by_task[module_info.task] = module_name
-                self.modules.append(module)
+        for dir_entry in modules_dir_path.iterdir():
+            # skip __pycache__, __init__.py ... explicitly
+            if dir_entry.name.startswith("_"):
+                log.debug("Skipping {} (_ prefix)", dir_entry)
+                continue
+            if not dir_entry.is_file():
+                log.warn("Skipping {} (not a file)", dir_entry)
+                continue
+            if not dir_entry.name.endswith(".py"):
+                log.warn("Skipping {} (not a .py file)", dir_entry)
+                continue
+            module_name = dir_entry.name[: -len(".py")]
+            log.debug("Loading {}", module_name)
+            module = importlib.import_module("." + module_name, __package__)
+            if not hasattr(module, "pyrt_module_info"):
+                log.warn("Skipping module {} (no pyrt_module_info)", module_name)
+                continue
+            module_info = module.pyrt_module_info  # type: ModuleInfo
+            if module_info.task in module_names_by_task:
+                raise Exception(
+                    "Duplicate module task "
+                    + module_info.task
+                    + " (used by both "
+                    + module_names_by_task[module_info.task]
+                    + " and "
+                    + module_name
+                    + ")"
+                )
+            module_names_by_task[module_info.task] = module_name
+            self.modules.append(module)
 
     def register_modules(self):
         log = self.log
@@ -1032,8 +1031,10 @@ def main():
     logging_helper.set_console_level(logging.INFO)
     log = logging_helper.get_logger(__name__)
 
+    log.debug("Constructing PyRTInterface")
     pyrti = PyRTInterface(logging_helper)
 
+    log.debug("Registering events")
     pyrti.register_event(EVENT_PARSE_ROM)
     pyrti.register_event(EVENT_DUMP_FILES)
     pyrti.register_event(EVENT_LOAD_FILES)

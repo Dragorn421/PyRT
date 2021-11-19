@@ -130,7 +130,7 @@ def load_object_files(
             raise Exception(
                 "Can't find a leading number in directory name", load_file_dirpath.name
             )
-        object_id_str = m[1]
+        object_id_str = m.group(1)
         object_id = int(object_id_str, 0)
         assert object_id < len(module_data.object_table)
         rom_file = module_data.object_table[object_id]
