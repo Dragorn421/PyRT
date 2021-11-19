@@ -23,16 +23,20 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import List, Dict, Set, Tuple, Optional, Callable, Any
+    from typing import List, Dict, Set, Tuple, Optional, Callable, Any, Union
     from types import ModuleType
     import io
+
+    RomFileData = Union[bytes, memoryview]
 
 import logging
 from pathlib import Path
 
 import struct
+import codecs
 import math
 import re
+import bisect
 
 
 class LoggingHelper:
@@ -59,6 +63,11 @@ class LoggingHelper:
     def get_logger(self, name):
         log = self.root_logger.getChild(name)
 
+        # TODO Write own logging system? to improve trace() performance
+        # trace() calls take half the script's run time when writing trace levels to
+        # file (100% overhead),
+        # and still a quarter of it when not writing them (33% overhead).
+        # At least make a wrapper for disabling trace calls entirely if not needed?
         def trace(message, *args, **kwargs):
             if log.isEnabledFor(LoggingHelper.trace_level):
                 log._log(LoggingHelper.trace_level, message, args, **kwargs)
@@ -93,7 +102,7 @@ class LoggingHelper:
     def set_console_level(self, level):
         self.root_logger_stream_handler.setLevel(level)
 
-    def set_log_file(self, path):
+    def set_log_file(self, path, level=1):
         if self.root_logger_file_handler is not None:
             self.root_logger.removeHandler(self.root_logger_file_handler)
             self.root_logger_file_handler = None
@@ -101,7 +110,7 @@ class LoggingHelper:
             self.root_logger_file_handler = logging.FileHandler(path, mode="w")
             self.root_logger_file_handler.setFormatter(self.root_logger_formatter)
             self.root_logger.addHandler(self.root_logger_file_handler)
-            self.root_logger_file_handler.setLevel(1)
+            self.root_logger_file_handler.setLevel(level)
 
 
 class AllocatorOutOfFreeRanges(Exception):
@@ -201,7 +210,7 @@ class Allocator:
 def free_strings(
     allocator,  # type: Allocator
     ranges,  # type: List[Tuple]
-    data,  # type: bytes
+    data,  # type: Union[bytes, bytearray, memoryview]
 ):
     """
     Mark as free the space used by the strings delimited by `ranges`,
@@ -304,7 +313,7 @@ class DmaEntry:
 class RomFile:
     def __init__(
         self,
-        data,  # type: bytes
+        data,  # type: RomFileData
         dma_entry,  # type: DmaEntry
         moveable_rom=False,
         moveable_vrom=False,
@@ -316,7 +325,11 @@ class RomFile:
 
 
 class RomFileEditable(RomFile):
-    def __init__(self, rom_file, resizable):
+    def __init__(
+        self,
+        rom_file,  # type: RomFile
+        resizable,  # type: bool
+    ):
         self.data = bytearray(rom_file.data)
         self.dma_entry = rom_file.dma_entry
         self.moveable_rom = rom_file.moveable_rom
@@ -329,14 +342,12 @@ class ROM:
     def __init__(
         self,
         version_info,  # type: VersionInfo
-        data,  # type: bytes
         files,  # type: List[RomFile]
         logging_helper=None,  # type: Optional[LoggingHelper]
     ):
         self.log = None if logging_helper is None else logging_helper.get_logger("ROM")
 
         self.version_info = version_info
-        self.data = data
 
         self.file_makerom = files[self.version_info.dmaentry_index_makerom]
 
@@ -384,16 +395,31 @@ class ROM:
         if prev_is_unaccounted:
             yield (unaccounted_strand_start, rom_size)
 
-    def find_file_by_vrom(self, vrom):
-        matching_files = [
-            file
-            for file in self.files
-            if vrom >= file.dma_entry.vrom_start and vrom < file.dma_entry.vrom_end
+    def update_files_sorted_by_vrom(self):
+        files_sorted_by_vrom = self.files.copy()
+        files_sorted_by_vrom.sort(key=lambda file: file.dma_entry.vrom_start)
+        self.files_sorted_by_vrom = files_sorted_by_vrom
+        self.files_vrom_sorted_by_vrom = [
+            file.dma_entry.vrom_start for file in files_sorted_by_vrom
         ]
-        assert len(matching_files) == 1
-        return matching_files[0]
 
-    def new_file(self, data, name=None):
+    def find_file_by_vrom(self, vrom):
+        """
+        make sure update_files_sorted_by_vrom has been called recently enough
+        before calling this function
+        """
+        matching_file_i = bisect.bisect_left(self.files_vrom_sorted_by_vrom, vrom)
+        assert matching_file_i < len(self.files_sorted_by_vrom)
+        assert ((matching_file_i + 1) >= len(self.files_sorted_by_vrom)) or (
+            vrom < self.files_sorted_by_vrom[matching_file_i + 1].dma_entry.vrom_start
+        )
+        return self.files_sorted_by_vrom[matching_file_i]
+
+    def new_file(
+        self,
+        data,  # type: RomFileData
+        name=None,
+    ):
         dma_entry = DmaEntry(None, None, None, None, name)
         rom_file = RomFile(data, dma_entry, True, True)
         self.files.append(rom_file)
@@ -516,13 +542,17 @@ class ROMReader:
         version_info,
         logging_helper=None,  # type: Optional[LoggingHelper]
     ):
+        self.logging_helper = logging_helper
         self.log = (
             None if logging_helper is None else logging_helper.get_logger("ROMReader")
         )
 
         self.version_info = version_info
 
-    def read(self, data):
+    def read(
+        self,
+        data,  # type: memoryview
+    ):
         dma_entries, file_boot = self.parse_dma_table(data)
 
         files = []  # type: List[RomFile]
@@ -536,7 +566,7 @@ class ROMReader:
 
         files[self.version_info.dmaentry_index_boot] = file_boot
 
-        rom = ROM(self.version_info, data, files)
+        rom = ROM(self.version_info, files, self.logging_helper)
 
         # TODO can all other files really move?
         for file in rom.files:
@@ -555,7 +585,7 @@ class ROMReader:
         return rom
 
     def parse_dma_table(self, data):
-        # type: (bytes) -> Tuple[List[DmaEntry], RomFileEditable]
+        # type: (memoryview) -> Tuple[List[DmaEntry], RomFileEditable]
 
         # read dmadata entry early, to get dma table length
 
@@ -628,9 +658,10 @@ class ROMReader:
                 (filename_boot_offset_start, filename_boot_offset_end + 1)
             )
 
-            return file_boot.data[
-                filename_boot_offset_start:filename_boot_offset_end
-            ].decode("ascii")
+            return codecs.decode(
+                file_boot.data[filename_boot_offset_start:filename_boot_offset_end],
+                "ascii",
+            )
 
         if self.log is not None:
             self.log.trace("Parsed DMA table:")
@@ -1050,6 +1081,7 @@ def main():
     log.info("Reading ROM...")
     with open("oot-mq-debug.z64", "rb") as f:
         data = f.read()
+    data = memoryview(data)
 
     version_info = version_info_mq_debug
     rom_reader = ROMReader(version_info, logging_helper)
@@ -1069,12 +1101,13 @@ def main():
                         for v in set(data[start:end])
                     ),
                 )
-                for start, end in rom.find_unaccounted(rom.data)
+                for start, end in rom.find_unaccounted(data)
             )
         )
 
     pyrti.set_rom(rom)
 
+    rom.update_files_sorted_by_vrom()
     pyrti.raise_event(EVENT_PARSE_ROM)
 
     pyrti.raise_event(EVENT_DUMP_FILES)

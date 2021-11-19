@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from typing import List, Optional, Dict
 
 import struct
+import codecs
 
 
 actor_overlay_struct = struct.Struct(">IIIIIIIHbx")
@@ -137,9 +138,9 @@ def parse_actor_overlay_table(
                 (name_code_offset_start, name_code_offset_end + 1)
             )
 
-            name = rom.file_code.data[
-                name_code_offset_start:name_code_offset_end
-            ].decode("ascii")
+            name = codecs.decode(
+                rom.file_code.data[name_code_offset_start:name_code_offset_end], "ascii"
+            )
 
             actor_overlay = ActorOverlay(
                 actor_overlay_file if is_overlay else None,

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import List, Dict
+    import logging
     from . import scene_table
 
 import struct
@@ -46,7 +47,10 @@ class SceneHeaderRoomLists:
         )  # type: Dict[scene_table.SceneTableEntry, List[pyrt.RomFile]]
 
 
-def find_alternate_headers(scene_data, log):
+def find_alternate_headers(
+    scene_data,  # type: pyrt.RomFileData
+    log,  # type: logging.Logger
+):
     header_offsets = []
     offset = 0
     code = None
